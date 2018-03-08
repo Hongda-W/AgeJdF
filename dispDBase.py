@@ -1,0 +1,783 @@
+import pyasdf
+from netCDF4 import Dataset
+import numpy as np
+import obspy
+from obspy.signal.invsim import cosine_taper
+from obspy.signal.regression import linear_regression
+from matplotlib.colors import LightSource
+from mpl_toolkits.basemap import Basemap, shiftgrid, cm
+import matplotlib.pyplot as plt
+import pycpt
+from matplotlib.patches import Polygon, Path
+from scipy.interpolate import NearestNDInterpolator, LinearNDInterpolator
+from scipy import optimize
+import scipy.signal
+import scipy.fftpack
+from itertools import compress
+from pyproj import Geod
+import os
+import warnings
+
+
+class dispASDF(pyasdf.ASDFDataSet):
+	"""An class for analyzing dispersion curves based on ASDF database
+	"""
+	def set_poly(self,lst,minlon,minlat,maxlon,maxlat):
+		"""Define the polygon for study region and max(min) longitude/latitude for map view
+		Parameters:  lst  -- list of (lon, lat) defining the polygon for study region
+					 minlon, minlat, maxlon, maxlat -- minimum and miximum coordinates for the input age model
+		"""
+		self.poly = Polygon(lst)
+		self.perimeter = self.poly.get_path()
+		self.minlon = minlon; self.minlat = minlat; self.maxlon = maxlon; self.maxlat = maxlat		
+		return
+	
+	def point_in(self):
+		"""test if a point of given longitude and latitude is in the polygon of study region
+		"""
+		return
+	
+	def path_in(self):
+		"""test if the line connecting 2 given points is in the polygon
+		"""
+		return
+	
+	def read_age_mdl(self):
+		"""read in crustal age model for the oceans
+		"""
+		# dset = Dataset('/projects/howa1663/Code/ToolKit/Models/Age_Ocean_Crust/age.3.2.nc','r')
+		dset = Dataset('./age.3.2.nc','r')
+		longitude = dset.variables['x'][:]
+		longitude[longitude<0] += 360.
+		latitude = dset.variables['y'][:]
+		z = dset.variables['z'][:] # masked array
+		mask = dset.variables['z'][:].mask
+		data = dset.variables['z'][:].data / 100.
+		data[mask] = 99999.
+		data = data[(latitude > self.minlat)*(latitude < self.maxlat),:]
+		data = data[:,(longitude > self.minlon)*(longitude < self.maxlon)]
+		longitude = longitude[(longitude > self.minlon)*(longitude < self.maxlon)]
+		latitude = latitude[(latitude > self.minlat)*(latitude < self.maxlat)]
+		self.age_data = data; self.age_lon = longitude; self.age_lat = latitude
+		return
+	
+	def read_topo_mdl(self):
+		"""Read in topography model, return the function for calculating topography at any given point.
+		"""
+		# etopo1 = Dataset('/projects/howa1663/Code/ToolKit/Models/ETOPO1/ETOPO1_Ice_g_gmt4.grd', 'r')
+		etopo1 = Dataset('/work2/wang/Code/ToolKit/ETOPO1_Ice_g_gmt4.grd','r')
+		lons = etopo1.variables["x"][:]
+		west = lons<0 # mask array with negetive longitudes
+		west = 360.*west*np.ones(len(lons))
+		lons = lons+west
+		lats = etopo1.variables["y"][:]
+		z = etopo1.variables["z"][:]
+		etopoz = z[(lats>(self.minlat))*(lats<(self.maxlat)), :]
+		etopoz = etopoz[:, (lons>self.minlon)*(lons<self.maxlon)]
+		lats = lats[(lats>self.minlat)*(lats<self.maxlat)]
+		lons = lons[(lons>self.minlon)*(lons<self.maxlon)]
+		etopox, etopoy = np.meshgrid(lats, lons, indexing='ij')
+		etopox = etopox.flatten()
+		etopoy = etopoy.flatten()
+		points = np.vstack((etopox,etopoy)).T
+		etopoz = etopoz.flatten()
+		f = LinearNDInterpolator(points,etopoz)
+		return f
+
+	def read_stations(self,stafile,source='CIEI',chans=['BHZ', 'BHE', 'BHN']):
+		"""Read in stations from station list file
+		
+		"""
+		with open(stafile, 'r') as f:
+			Sta = []
+			site = obspy.core.inventory.util.Site(name='01')
+			creation_date = obspy.core.utcdatetime.UTCDateTime(0)
+			inv = obspy.core.inventory.inventory.Inventory(networks=[], source=source)
+			total_number_of_channels = len(chans)
+			for lines in f.readlines():
+				lines = lines.split()
+				stacode = lines[0]
+				lon = float(lines[1])
+				lat = float(lines[2])
+				if not self.perimeter.contains_point((lon,lat)): continue;
+				netcode = lines[3]
+				netsta = netcode+'.'+stacode
+				if Sta.__contains__(netsta):
+					index = Sta.index(netsta)
+					if abs(self[index].lon-lon) >0.01 and abs(self[index].lat-lat) >0.01:
+						raise ValueError('Incompatible Station Location:' + netsta+' in Station List!')
+					else:
+						print('Warning: Repeated Station:' +netsta+' in Station List!')
+						continue
+				Sta.append(netsta)
+				channels = []
+				if lon > 180.:
+					lon -= 360.
+				for chan in chans:
+					channel = obspy.core.inventory.channel.Channel(code=chan, location_code='01', latitude=lat, longitude=lon,
+							elevation=0.0, depth=0.0)
+					channels.append(channel)
+				station = obspy.core.inventory.station.Station(code=stacode, latitude=lat, longitude=lon, elevation=0.0,
+						site=site, channels=channels, total_number_of_channels = total_number_of_channels, creation_date = creation_date)
+				network = obspy.core.inventory.network.Network(code=netcode, stations=[station])
+				networks = [network]
+				inv += obspy.core.inventory.inventory.Inventory(networks=networks, source=source)
+		print('Writing obspy inventory to ASDF dataset')
+		self.add_stationxml(inv)
+		print('End writing obspy inventory to ASDF dataset')
+		return
+	
+	def get_ages(self, arr):
+		""" calculate ages for a give list of points on the ocean floor
+		Parameters:
+					arr  -- numpy array of size ( ,2), containing the lat & lon for the points
+		"""
+		yy, xx = np.meshgrid(self.age_lon, self.age_lat)
+		xx = xx.reshape(xx.size)
+		yy = yy.reshape(yy.size)
+		x = np.vstack((xx,yy)).T
+		y = self.age_data.reshape(self.age_data.size)
+		f = NearestNDInterpolator(x,y,rescale=False)
+		ages = f(arr)
+		return ages
+			
+	def read_paths(self,disp_dir='/work3/wang/JdF/FTAN',res=3.5):
+		"""read in dispersion curve measurements from files, calculate ages along great circle path, read waveforms
+		Paramenters:  disp_dir -- directory for the dispersion measurement results
+					  res      -- resolution for the great circle sampling points
+		"""
+		yy, xx = np.meshgrid(self.age_lon, self.age_lat)
+		xx = xx.reshape(xx.size)
+		yy = yy.reshape(yy.size)
+		x = np.vstack((xx,yy)).T
+		y = self.age_data.reshape(self.age_data.size)
+		f = NearestNDInterpolator(x,y,rescale=False) # nearest-neighbour interpolation
+		f_topo = self.read_topo_mdl()
+		staLst = self.waveforms.list()
+		print('Reading dispersion curves & averaging crustal age along paths')
+		for staid1 in staLst:
+			lat1 = self.waveforms[staid1].coordinates['latitude']
+			lon1 = self.waveforms[staid1].coordinates['longitude']
+			netcode1, stacode1 = staid1.split('.')
+			if lon1 < 0.:
+				lon1 += 360.
+			for staid2 in staLst:
+				if staid1 >= staid2: continue;
+				lat2 = self.waveforms[staid2].coordinates['latitude']
+				lon2 = self.waveforms[staid2].coordinates['longitude']
+				if lon2 < 0.:
+					lon2 += 360.
+				gc_path, dist = get_gc_path(lon1,lat1,lon2,lat2,res) # the great circle path travels beyond the study region
+				if not self.perimeter.contains_path(Path(gc_path)):
+					print("Station "+staid1+" not in study region! Will be discarded!")
+					del self.waveforms[staid1]
+					continue; # the great circle path travels beyond the study region	
+				netcode2, stacode2 = staid2.split('.')
+				gc_points = np.array(gc_path)
+				ages = f(gc_points[:,::-1])
+				depths = f_topo(gc_points[:,::-1])
+				if ages.max() > 300: continue; # the paths went out the model bound
+				#age_avg = 1/((1./ages).mean())
+				age_avg = ages.mean()
+				depth_avg = depths.mean()
+				disp_file = disp_dir+'/'+stacode1+'/'+'COR_'+stacode1+'_'+stacode2+'.SAC_2_DISP.1'
+				snr_file = disp_dir+'/'+stacode1+'/'+'COR_'+stacode1+'_'+stacode2+'.SAC_2_amp_snr'
+				if not os.path.isfile(disp_file): continue;
+				arr = np.loadtxt(disp_file)
+				arr_snr = np.loadtxt(snr_file)
+				snrp_vec = arr_snr[:,2] # snr for positive lag signal
+				snrn_vec = arr_snr[:,4] # snr for negative lag signal
+				transp = np.vstack((snrp_vec,snrn_vec)).max(axis=0) > 3 # mean snr > 5
+				# transp = np.vstack((snrp_vec,snrn_vec)).min(axis=0) > 5 # both positive & negative lag have snr > 5
+				if (transp*1).max() == 0:
+					continue
+				per_vec = arr[transp,2]
+				grv_vec = arr[transp,3]
+				phv_vec = arr[transp,4]
+				d_g = grv_vec[1:]-grv_vec[:-1]
+				try:
+					d_g[per_vec[1:]<6.] = 1. # don't consider period less than 5. sec
+					index = np.where(d_g < -0.2)[0][0] # find out where the group velocity starts to drop larger than 0.2
+					per_vec = per_vec[:index+1] # only keep results before the group velocity starts to drop
+					grv_vec = grv_vec[:index+1]
+					phv_vec = phv_vec[:index+1]
+					snrp_vec = snrp_vec[:index+1]
+					snrn_vec = snrn_vec[:index+1]
+				except:
+					pass
+				mask = per_vec*phv_vec > dist # interstation distance larger than one wavelength
+				try:
+					ind1 = np.where(mask)[0][0] # 1st True
+					if ind1 == 0:
+						continue
+				except:
+					ind1 = per_vec.size
+				disp_arr = np.vstack((per_vec[:ind1],grv_vec[:ind1],phv_vec[:ind1],snrp_vec[:ind1],snrn_vec[:ind1]))
+				# xcorr_file = disp_dir+'/'+stacode1+'/'+'COR_'+stacode1+'_'+stacode2+'.SAC'
+				# if not os.path.isfile(xcorr_file): continue;
+				# tr = obspy.core.read(xcorr_file)[0]
+				# xcorr_header = {'stacode1': '', 'stacode2': '', 'npts': 12345, 'b': 12345, 'e': 12345, \
+				# 				'delta': 12345, 'dist': 12345, 'stackday': 0}
+				# xcorr_header['b'] = tr.stats.sac.b
+				# xcorr_header['e'] = tr.stats.sac.e
+				# xcorr_header['stacode1'] = stacode1
+				# xcorr_header['stacode2'] = stacode2
+				# xcorr_header['npts'] = tr.stats.npts
+				# xcorr_header['delta'] = tr.stats.delta
+				# xcorr_header['stackday'] = tr.stats.sac.user0
+				# try:
+				# 	xcorr_header['dist'] = tr.stats.sac.dist
+				# except AttributeError:
+				# 	xcorr_header['dist'] = dist
+				staid_aux = netcode1+'/'+stacode1+'/'+netcode2+'/'+stacode2
+				parameters1 = {'age_avg': age_avg, 'depth_avg': depth_avg,'dist':dist, 'L_gc':len(gc_path)}
+				ages_path = np.concatenate((gc_points,ages.reshape(-1,1)),axis=1)
+				self.add_auxiliary_data(data=ages_path, data_type='AgeGc', path=staid_aux, parameters=parameters1)
+				parameters2 = {'T': 0, 'grV': 1, 'phV': 2, 'snr_p': 3, 'snr_n': 4,'dist': dist, 'Np': ind1}
+				self.add_auxiliary_data(data=disp_arr, data_type='DISPArray', path=staid_aux, parameters=parameters2)
+				#self.add_auxiliary_data(data=tr.data, data_type='NoiseXcorr', path=staid_aux, parameters=xcorr_header)
+		print('End of reading dispersion curves')
+		return
+	
+	def intp_disp(self,pers,verbose=False):
+		"""interpolate the dispersion curves to a given period band, QC was applied during this process
+		Parameter:  pers -- period array
+		"""
+		if pers.size == 0:
+			pers = np.append( np.arange(6.)*2.+6., np.arange(4.)*3.+18.)
+		self.pers = pers
+		staLst = self.waveforms.list()
+		for staid1 in staLst:
+			netcode1, stacode1 = staid1.split('.')
+			for staid2 in staLst:
+				netcode2, stacode2 = staid2.split('.')
+				if staid1 >= staid2: continue
+				try:
+					subdset = self.auxiliary_data['DISPArray'][netcode1][stacode1][netcode2][stacode2]
+				except:
+					continue
+				data = subdset.data.value
+				index = subdset.parameters
+				dist = index['dist']
+				if verbose:
+					print('Interpolating dispersion curve for '+ netcode1+'.'+stacode1+'_'+netcode2+'.'+stacode2)
+				outindex = { 'T': 0, 'grV': 1, 'phV': 2,  'snr_p': 3, 'snr_n': 4, 'dist': dist, 'Np': pers.size }
+				Np = int(index['Np'])
+				if Np < 5:
+					warnings.warn('Not enough datapoints for: '+ netcode1+'.'+stacode1+'_'+netcode2+'.'+stacode2, UserWarning, stacklevel=1)
+					continue
+				obsT = data[index['T']][:Np]
+				grV = np.interp(pers, obsT, data[index['grV']][:Np] )
+				phV = np.interp(pers, obsT, data[index['phV']][:Np] )
+				inbound = (pers > obsT[0])*(pers < obsT[-1])
+				if grV[inbound].size == pers[inbound].size and phV[inbound].size == pers[inbound].size:
+					interpdata = np.append(pers[inbound], grV[inbound])
+					interpdata = np.append(interpdata, phV[inbound])
+				else:
+					continue
+				snr_p = np.interp(pers, obsT, data[index['snr_p']][:Np] )
+				snr_n = np.interp(pers, obsT, data[index['snr_n']][:Np] )
+				interpdata = np.append(interpdata, snr_p[inbound])
+				interpdata = np.append(interpdata, snr_n[inbound])
+				interpdata = interpdata.reshape(5, pers[inbound].size)
+				staid_aux = netcode1+'/'+stacode1+'/'+netcode2+'/'+stacode2
+				self.add_auxiliary_data(data=interpdata, data_type='DISPinterp', path=staid_aux, parameters=outindex)
+		return
+		
+	
+	def get_basemap(self,model='age'):
+		"""get basemap from given model, use ocean crustal age model or etopo model
+		Parameters:   model -- use which type of data for basemap, 'age' or 'etopo'
+		"""
+		if model == 'age':
+			distEW, az, baz=obspy.geodetics.gps2dist_azimuth(self.minlat, self.minlon, self.minlat, self.maxlon) # distance is in m
+			distNS, az, baz=obspy.geodetics.gps2dist_azimuth(self.minlat, self.minlon, self.maxlat+2., self.minlon) # distance is in m
+			m = Basemap(width=distEW, height=distNS, rsphere=(6378137.00,6356752.3142), resolution='i', projection='lcc',\
+						lat_1=self.minlat-1, lat_2=self.maxlat+1, lon_0=(self.minlon+self.maxlon)/2, lat_0=(self.minlat+self.maxlat)/2)
+			m.drawparallels(np.arange(-80.0,80.0,5.0), linewidth=1, dashes=[2,2], labels=[1,0,0,0], fontsize=15)
+			m.drawmeridians(np.arange(-170.0,170.0,5.0), linewidth=1, dashes=[2,2], labels=[0,0,1,0], fontsize=15)
+			m.drawcoastlines(linewidth=1.0)
+			m.drawcountries(linewidth=1.0)
+			m.drawstates(linewidth=1.0)
+			m.readshapefile('./Plates/PB2002_boundaries', name='PB2002_boundaries', drawbounds=True, \
+						linewidth=1, color='orange') # draw plate boundary on basemap
+			x, y = m(*np.meshgrid(self.age_lon,self.age_lat))
+			data = np.ma.masked_array(self.age_data, self.age_data > 9000)
+			img = m.pcolormesh(x, y, data, shading='gouraud', cmap='jet_r', vmin=0, vmax=11,alpha=0.5) # cmap possible choices: "jet","Spectral"
+			m.drawmapboundary(fill_color="white")
+			cbar = m.colorbar(img,location='bottom',pad="3%")
+			cbar.set_alpha(1)
+			cbar.draw_all()
+			cbar.set_label('Age (Ma)')
+			# plt.show()
+		elif model == 'etopo':
+			code
+		else:
+			raise ValueError('Only age or etopo model can be used for constructing basemap')
+					
+		return m
+	
+	def plot_stations(self,ppoly=False):
+		"""Plot stations on basemap
+			basemap -- 'age' or 'etopo'
+			ppoly   -- flag for if showing the boundary polygon
+		"""
+		staLst = self.waveforms.list()
+		m = self.get_basemap()
+		for staid in staLst:
+			lat = self.waveforms[staid].coordinates['latitude']
+			lon = self.waveforms[staid].coordinates['longitude']
+			lat_x, lat_y = m(lon,lat)
+			m.plot(lat_x,lat_y,'^',color='olive')
+		if ppoly:
+			point_arr = self.poly.get_xy() 
+			xx, yy = m(point_arr[:,0],point_arr[:,1])
+			cord_arr = np.vstack((xx,yy)).T
+			poly = Polygon(cord_arr,facecolor='none', edgecolor='k')
+			plt.gca().add_patch(poly)
+		plt.title('Station map',fontsize=16)
+		plt.show()
+		return
+	
+	def get_vel_age(self, c0,c1,c2,vmin,vmax):
+		""" Calculate 2-D velocity map based on the three coefficients
+		"""
+		age_data = self.age_data
+		age_lon = self.age_lon
+		age_lat = self.age_lat
+		llon, llat = np.meshgrid(age_lon, age_lat,indexing='ij')
+		ccords = np.dstack((llon,llat)).reshape(llon.size,2)
+		ind_arr = self.perimeter.contains_points(ccords).reshape(llon.shape[0],llon.shape[1]) # select the data points inside the pre-set polygon
+		vel_arr = (c0+ c1*np.sqrt(age_data) + c2*age_data)*np.transpose(ind_arr.astype(float))
+		distEW, az, baz=obspy.geodetics.gps2dist_azimuth(self.minlat, self.minlon, self.minlat, self.maxlon) # distance is in m
+		distNS, az, baz=obspy.geodetics.gps2dist_azimuth(self.minlat, self.minlon, self.maxlat+2., self.minlon) # distance is in m
+		m = Basemap(width=distEW, height=distNS, rsphere=(6378137.00,6356752.3142), resolution='i', projection='lcc',\
+					lat_1=self.minlat-1, lat_2=self.maxlat+1, lon_0=(self.minlon+self.maxlon)/2, lat_0=(self.minlat+self.maxlat)/2)
+		m.drawparallels(np.arange(-80.0,80.0,2.0), linewidth=1, dashes=[2,2], labels=[1,0,0,0], fontsize=15)
+		m.drawmeridians(np.arange(-170.0,170.0,2.0), linewidth=1, dashes=[2,2], labels=[0,0,1,0], fontsize=15)
+		m.drawcoastlines(linewidth=1.0)
+		m.drawcountries(linewidth=1.0)
+		m.drawstates(linewidth=1.0)
+		m.readshapefile('./Plates/PB2002_boundaries', name='PB2002_boundaries', drawbounds=True, \
+						linewidth=1, color='orange') # draw plate boundary on basemap
+		x, y = m(*np.meshgrid(age_lon,age_lat))
+		data = np.ma.masked_array(vel_arr, vel_arr < 0.1)
+		img = m.pcolormesh(x, y, data, shading='gouraud', cmap='jet_r', vmin=vmin, vmax=vmax) # cmap possible choices: "jet","Spectral"
+		m.drawmapboundary(fill_color="white")
+		cbar = m.colorbar(img,location='bottom',pad="3%")
+		#cbar.solids.set_eddgecolor("face")
+		cbar.set_label('Vel (km/s)')
+		# plt.title('Age-dependent velocity map',fontsize=16)
+		plt.show()
+		return
+	
+	def count_path(self):
+		"""get number of paths at all periods for all stations
+		"""
+		return
+
+	def fit_Harmon(self,period,vel_type='phase'):
+		"""find the 3 coefficients which best fit the Harmon velocity-age relationship. [Ye et al, GGG, 2013, eq(1)]
+		Parameters:  period   -- the period of the group or phase velocity to analyse for
+					 vel_type -- type of velocity to invert for. 'group' or 'phase'
+		"""
+		try:
+			subset = self.auxiliary_data.FitResult[str_per][vel_type]
+			warnings.warn("Funciton fit_Harmon has been run for this period and velocity type!")
+			return
+		except:
+			pass
+		staLst = self.waveforms.list()
+		dist_lst = []
+		int_dis_lst = []
+		ages_lst = []
+		age_avg_lst = []
+		V_lst = []
+		netcode1_lst = []# used to save which stations were left after final fitting model
+		stacode1_lst = []
+		netcode2_lst = []
+		stacode2_lst = [] # used to save which stations were left after final fitting model
+		for staid1 in staLst:
+			netcode1, stacode1 = staid1.split('.')
+			for staid2 in staLst:
+				if staid1 >= staid2: continue;
+				netcode2, stacode2 = staid2.split('.')
+				try:
+					T_V = self.auxiliary_data['DISPinterp'][netcode1][stacode1][netcode2][stacode2].data.value # T, grV, phV
+				except:
+					continue
+				ind_T = np.where(T_V[0,:]==period)[0]
+				if ind_T.size != 1: continue;
+				if vel_type == 'group':
+					ind_V = 1
+				elif vel_type == 'phase':
+					ind_V = 2
+				else:
+					raise AttributeError('velocity type can only be group or phase')
+				try:
+					subset_age = self.auxiliary_data['AgeGc'][netcode1][stacode1][netcode2][stacode2]
+				except:
+					print((stacode1+'_'+stacode2+'pair has interpolated dispersion curve but dont have age along path'))
+					continue
+				if T_V[3,ind_T] < 5. or T_V[4,ind_T] < 5.: # snr_p or snr_n smaller than 5.
+					continue
+				d_T = min(period/3, 2.)
+				time_delay = get_ph_misfit(period,1./(period+d_T),1./(period-d_T),stacode1,stacode2,T_V[1,ind_T])
+				if np.abs(time_delay) > 1. or np.abs(time_delay / period) > 0.2:
+					continue
+				if T_V[2,ind_T]<T_V[1,ind_T]: #phase velocity smaller than group velocity
+					continue
+				V_lst.append(T_V[ind_V,ind_T])
+				dist = subset_age.parameters['dist']
+				dist_lst.append(dist)
+				inter_dist = dist / (subset_age.parameters['L_gc']-1)
+				int_dis_lst.append(inter_dist)
+				ages = subset_age.data.value[:,2]
+				age_avg_lst.append(subset_age.parameters['age_avg'])
+				ages_lst.append(ages)
+				netcode1_lst.append(netcode1)
+				stacode1_lst.append(stacode1)
+				netcode2_lst.append(netcode2)
+				stacode2_lst.append(stacode2)
+		if not len(ages_lst)==len(V_lst) & len(V_lst)==len(int_dis_lst):
+			raise AttributeError('The number of inter-station paths are incompatible for inverting c0, c1 & c2')
+		dist = np.array(dist_lst)
+		d_dist = np.array(int_dis_lst)
+		age_avgs = np.array(age_avg_lst)
+		V = np.array(V_lst).reshape(len(V_lst))
+		
+		fits = np.polyfit(np.sqrt(age_avgs),V,2)
+		p = np.poly1d(fits)
+		predict_V = p(np.sqrt(age_avgs))
+		diffs = np.abs(predict_V-V)
+		diffs_mean = np.mean(diffs)
+		diffs_std = np.std(diffs)
+		ind = np.abs(diffs-diffs_mean) < 3*diffs_std # discard those datapoints which are far away from a crude model.
+		ages_lst_final = list(compress(ages_lst,ind))
+		params = (dist[ind], d_dist[ind], V[ind], ages_lst_final)
+		# params = (dist, d_dist, V, ages_lst)
+		cranges = (slice(0.5,4,0.1), slice(-0.5,0.5,0.05), slice(-1.,1,0.05))
+		resbrute = optimize.brute(sq_misfit,cranges,args=params,full_output=True,finish=None)
+		c0, c1, c2 = resbrute[0]
+		data_out = np.vstack((age_avgs[ind],V[ind])).T # [-1,2] array, storing average age and velocity
+		netcode1_lst_final = list(compress(netcode1_lst,ind))
+		netcode2_lst_final = list(compress(netcode2_lst,ind))
+		stacode1_lst_final = list(compress(stacode1_lst,ind))
+		stacode2_lst_final = list(compress(stacode2_lst,ind))
+		netcode1_arr = np.chararray(len(netcode1_lst_final),itemsize=2); netcode2_arr = np.chararray(len(netcode2_lst_final),itemsize=2)
+		stacode1_arr = np.chararray(len(stacode1_lst_final),itemsize=5); stacode2_arr = np.chararray(len(stacode2_lst_final),itemsize=5)
+		netcode1_arr[:] = netcode1_lst_final[:]
+		stacode1_arr[:] = stacode1_lst_final[:]
+		netcode2_arr[:] = netcode2_lst_final[:]
+		stacode2_arr[:] = stacode2_lst_final[:]
+		# data_out = np.vstack((age_avgs,V)).T # [-1,2] array, storing average age and velocity
+		# netcode1_arr = np.chararray(len(netcode1_lst),itemsize=2); netcode2_arr = np.chararray(len(netcode2_lst),itemsize=2)
+		# stacode1_arr = np.chararray(len(stacode1_lst),itemsize=5); stacode2_arr = np.chararray(len(stacode2_lst),itemsize=5)
+		# netcode1_arr[:] = netcode1_lst[:]
+		# stacode1_arr[:] = stacode1_lst[:]
+		# netcode2_arr[:] = netcode2_lst[:]
+		# stacode2_arr[:] = stacode2_lst[:]
+		
+		stas_arr_final = np.vstack((netcode1_arr,stacode1_arr,netcode2_arr,stacode2_arr)).T
+		# plt.plot(age_avgs[ind],V[ind],'r.')
+		# t0 = np.linspace(0,10,100)
+		# plt.plot(t0,p(np.sqrt(t0)), 'b-')
+		# plt.plot(t0,c0+c1*np.sqrt(t0)+c2*t0, 'g-')
+		# plt.show()
+		para_aux = str(period).zfill(2)+'/'+vel_type
+		parameters = {'c0':c0, 'c1':c1, 'c2':c2}
+		self.add_auxiliary_data(data=data_out, data_type='FitResult', path=para_aux, parameters=parameters)
+		out_index = {'netcode1':0, 'stacode1':1, 'netcode2':2, 'stacode2':3}
+		self.add_auxiliary_data(data=stas_arr_final, data_type='FinalStas', path=para_aux, parameters=out_index)
+		return resbrute
+	
+	def plot_vel_age(self,period,vel_type='phase'):
+		"""Plot velocity vs. oceanic crust age, both from model and measurement
+		"""
+		str_per = str(period).zfill(2)
+		age_vel = self.auxiliary_data.FitResult[str_per][vel_type].data.value
+		codes = self.auxiliary_data.FinalStas[str_per][vel_type].data.value
+		c0 = self.auxiliary_data.FitResult[str_per][vel_type].parameters['c0']
+		c1 = self.auxiliary_data.FitResult[str_per][vel_type].parameters['c1']
+		c2 = self.auxiliary_data.FitResult[str_per][vel_type].parameters['c2']
+		plt.plot(age_vel[:,0], age_vel[:,1], 'r.')
+		t0 = np.linspace(0,10,50)
+		plt.plot(t0,c0+c1*np.sqrt(t0)+c2*t0, 'b-')
+		# for i in range(len(codes)):
+		# 	plt.text(age_vel[i,0],age_vel[i,1],codes[i,1]+'_'+codes[i,3])
+		plt.title(str(period)+' sec '+vel_type+' velocity vs. oceanic age')
+		plt.xlim(xmin=0.)
+		plt.xlabel('age (ma)')
+		plt.ylabel('km/s')
+		plt.show()
+		return
+	
+	def plot_age_topo(self,period,vel_type='phase'):
+		"""Plot age vs. ocean depth averaged along path.
+		"""
+		str_per = str(period).zfill(2)
+		codes = self.auxiliary_data.FinalStas[str_per][vel_type].data.value
+		ages = np.array([])
+		depths = np.array([])
+		for code in codes:
+			age_avg = self.auxiliary_data['AgeGc'][code[0]][code[1]][code[2]][code[3]].parameters['age_avg']
+			depth_avg = self.auxiliary_data['AgeGc'][code[0]][code[1]][code[2]][code[3]].parameters['depth_avg']
+			ages = np.append(ages,age_avg)
+			depths = np.append(depths,depth_avg)
+		plt.plot(ages, depths, 'r.')
+		plt.title('Oceanic depth vs. age for '+str(period)+' sec paths')
+		plt.ylabel('Depth (m)')
+		plt.xlabel('Age (ma)')
+		plt.show()
+		return
+	
+	def plot_vel_topo(self, period, vel_type='phase'):
+		""" Plot velocity vs. ocean depth averaged along paths.
+		"""
+		str_per = str(period).zfill(2)
+		codes = self.auxiliary_data.FinalStas[str_per][vel_type].data.value
+		depths = np.array([])
+		for code in codes:	
+			depth_avg = self.auxiliary_data['AgeGc'][code[0]][code[1]][code[2]][code[3]].parameters['depth_avg']
+			depths = np.append(depths,depth_avg)
+		age_vel = self.auxiliary_data.FitResult[str_per][vel_type].data.value
+		plt.plot(depths, age_vel[:,1], 'r.')
+		plt.title(str(period)+' sec '+vel_type+' velocity vs. oceanic depth')
+		plt.xlabel('Depth (m)')
+		plt.ylabel('km/s')
+		plt.show()
+		return
+
+
+	def plot_all_vel(self,pers=np.array([6,8,10,14,18,24,27]),vel_type='phase'):
+		""" Plot the interpolated dispersion result in the same plot for a certain type of velocity
+		"""
+		colors = ['red','green','wheat','blue','orange','black','cyan']
+		i = 0
+		for period in pers:
+			str_per = str(period).zfill(2)
+			age_vel = self.auxiliary_data.FitResult[str_per][vel_type].data.value
+			c0 = self.auxiliary_data.FitResult[str_per][vel_type].parameters['c0']
+			c1 = self.auxiliary_data.FitResult[str_per][vel_type].parameters['c1']
+			c2 = self.auxiliary_data.FitResult[str_per][vel_type].parameters['c2']
+			plt.plot(age_vel[:,0], age_vel[:,1], '.',color=colors[i],label=str(period)+' sec')
+			t0 = np.linspace(0,np.max(age_vel[:,0]),100)
+			plt.plot(t0,c0+c1*np.sqrt(t0)+c2*t0,color=colors[i])
+			i += 1
+		plt.legend(loc='best',fontsize=16)
+		plt.title(vel_type+' velocity vs. oceanic age',fontsize=16)
+		plt.xlabel('age (ma)',fontsize=16)
+		plt.ylabel('km/s',fontsize=16)
+		plt.xlim(xmin=0.)
+		plt.xticks(fontsize=18)
+		plt.yticks(fontsize=18)
+		plt.show()
+		return
+
+	def plot_paths(self,period,vel_type='phase'):
+		""" Plot all the paths for dispersion curves used for a given period. The paths are great circle paths
+		"""
+		str_per = str(period).zfill(2)
+		codes = self.auxiliary_data.FinalStas[str_per][vel_type].data.value
+		m = self.get_basemap()
+		for code in codes:
+			lat1 = self.waveforms[code[0]+'.'+code[1]].coordinates['latitude']
+			lon1 = self.waveforms[code[0]+'.'+code[1]].coordinates['longitude']
+			lat2 = self.waveforms[code[2]+'.'+code[3]].coordinates['latitude']
+			lon2 = self.waveforms[code[2]+'.'+code[3]].coordinates['longitude']
+			gc_path, _ = get_gc_path(lon1,lat1,lon2,lat2,3)
+			gc_points = np.array(gc_path)
+			path_x, path_y = m(gc_points[:,0], gc_points[:,1])
+			#m.plot(path_x,path_y,color='black',linewidth=0.5)
+			m.plot(path_x[0],path_y[0],'^',color='olive')
+			m.plot(path_x[-1],path_y[-1],'^',color='olive')
+		plt.title(str(period)+' sec')
+		plt.show()
+		return
+	
+	def plot_age_model(lons, lats, resolution='i', cpt='/projects/howa1663/Code/ToolKit/Models/Age_Ocean_Crust/age1.cpt'):
+		
+		#mycm=pycpt.load.gmtColormap(cpt)
+		try:
+			etopo1 = Dataset('/work2/wang/Code/ToolKit/ETOPO1_Ice_g_gmt4.grd','r') # read in the etopo1 file which was used as the basemap
+			llons = etopo1.variables["x"][:]
+			west = llons<0 # mask array with negetive longitudes
+			west = 360.*west*np.ones(len(llons))
+			llons = llons+west
+			llats = etopo1.variables["y"][:]
+			zz = etopo1.variables["z"][:]
+			etopoz = zz[(llats>(lats[0]-2))*(llats<(lats[1]+2)), :]
+			etopoz = etopoz[:, (llons>(lons[0]-2))*(llons<(lons[1]+2))]
+			llats = llats[(llats>(lats[0]-2))*(llats<(lats[1]+2))]
+			llons = llons[(llons>(lons[0]-2))*(llons<(lons[1]+2))]
+			etopoZ = m.transform_scalar(etopoz, llons-360*(llons>180)*np.ones(len(llons)), llats, etopoz.shape[0], etopoz.shape[1]) # tranform the altitude grid into the projected coordinate
+			ls = LightSource(azdeg=315, altdeg=45)
+			m.imshow(ls.hillshade(z, vert_exag=0.05),cmap='gray')
+		except IOError:
+			print("Couldn't read etopo data or color map file! Check file directory!")
+		
+		return
+	
+	def write_2_sta_in(self, outdir="/work3/wang/JdF/Input_4_Ray", pers = np.array([]), outpfx="2_sta_in_",):
+		""" Write the FTAN measurements as input files for 2-station tomography
+		Parameters: outdir -- directory for the generated input files
+		            outpfx -- prefix for the name of generated files
+		"""
+		if not os.path.isdir(outdir):
+			os.makedirs(outdir)
+		if pers.size == 0:
+			pers=np.append( np.arange(18.)*2.+6.)
+		staLst = self.waveforms.list()
+		ph_f_lst = []
+		gr_f_lst = []
+		for prd in pers:
+			ph_name = outdir+"/"+outpfx+"%g"%(prd)+"_ph.lst"
+			gr_name = outdir+"/"+outpfx+"%g"%(prd)+"_gr.lst"
+			ph_f = open(ph_name, 'w')
+			gr_f = open(gr_name, 'w')
+			ph_f_lst.append(ph_f)
+			gr_f_lst.append(gr_f)
+			# to be written on the input file
+			# N(id), lat, lon1, lat2, lon2, pvel(gvel), 1.(weight), (strings doesn't really affect to result)staid1, staid2, 1, 1
+		i = -1
+		for staid1 in staLst:
+			netcode1, stacode1 = staid1.split('.')
+			lat1 = self.waveforms[staid1].coordinates['latitude']
+			lon1 = self.waveforms[staid1].coordinates['longitude']
+			if lon1<0: lon1 += 360.
+			for staid2 in staLst:
+				if staid1 >= staid2: continue;
+				netcode2, stacode2 = staid2.split('.')
+				i = i + 1
+				try:
+					itp_arr = self.auxiliary_data['DISPinterp'][netcode1][stacode1][netcode2][stacode2].data.value
+				except:
+					continue
+				if itp_arr.shape[1] == 0: continue	
+				lat2 = self.waveforms[staid2].coordinates['latitude']
+				lon2 = self.waveforms[staid2].coordinates['longitude']
+				dist, az, baz = obspy.geodetics.gps2dist_azimuth(lat1, lon1, lat2, lon2) # distance is in m
+				dist = dist/1000.
+				if lon2 < 0: lon2 += 360.
+				for iper in range(pers.size):
+					per = pers[iper]
+					ind_per = np.where(itp_arr[0,:] == per)[0]
+					if not ind_per.size == 1:
+						continue
+					pvel = itp_arr[2,ind_per][0]
+					gvel = itp_arr[1,ind_per][0]
+					# if dist < 2.*per*pvel: continue
+					# inbound=data[index['inbound']][ind_per]
+					# quality control
+					if pvel < 0 or gvel < 0 or pvel > 5 or gvel > 5: continue
+					if max(np.isnan([pvel, gvel])) != False: continue # skip if parameters in dispersion curve is nan
+					# if inbound != 1.: continue
+					fph = ph_f_lst[iper]
+					fgr = gr_f_lst[iper]
+					fph.writelines("%d %g %g %g %g %g 1. %s %s 1 1 \n" %(i, lat1, lon1, lat2, lon2, pvel, staid1, staid2))
+					fgr.writelines("%d %g %g %g %g %g 1. %s %s 1 1 \n" %(i, lat1, lon1, lat2, lon2, gvel, staid1, staid2))
+		for iper in range(pers.size):
+			fph = ph_f_lst[iper]
+			fgr = gr_f_lst[iper]
+			fph.close()
+			fgr.close()
+		print('End of Generating Misha Tomography Input File!')
+		return
+	
+def sq_misfit(z,*params):
+	"""Calculate total squared misfit. [Ye et al, GGG, 2013, eq(3)]
+	Parameters:  z   -- (c0,c1,c2), the coefficients we want to invert
+	        params -- dist, array (Npairs,); d_dist, array(Nparis,); V, array(Npairs,);
+	                  ages_lst, list of arrays, Npairs number of arrays with different sizes;
+	"""
+	c0, c1, c2 = z # period dependent coefficients
+	dist, d_dist, V, ages_lst = params
+	if not len(ages_lst)==dist.size & dist.size==d_dist.size & V.size==dist.size:
+			raise AttributeError('The number of inter-station paths are incompatible for inverting c0, c1 & c2')
+	t_path = np.zeros(dist.shape)
+	for i,ages in enumerate(ages_list):
+		age_avg = (ages[0:-1] + ages[1:])/2
+		d_d = np.repeat(d_dist[i], age_avg.size)
+		v_ages = c0+c1*np.sqrt(age_avg)+c2*age_avg
+		v_ages[v_ages==0] = d_dist[i]/9999. # if model gives a 0 velocity change it to a small number to avoid 0 division
+		t_path[i] = (d_d/v_ages).sum()
+	sq_misfit = ((dist/t_path - V) **2).sum()
+	return sq_misfit
+
+def get_gc_path(lon1,lat1,lon2,lat2,res):
+	"""Calculate great circle paths for all station pairs
+	Parameter:  lon1, lat1 -- longitude and latitude for the starting point
+				lon2, lat2 -- longitude and latitude for the ending point
+				res        -- resolution in km
+	Return:     gc_path -- list containing longitudes and latitudes of points along the great circle
+				dist    -- distance between the starting and ending points along the great circle
+	"""
+	g = Geod(ellps='WGS84')
+	(az,baz,dist) = g.inv(lon1,lat1,lon2,lat2)
+	dist /= 1000. # convert to km
+	gc_path = g.npts(lon1,lat1,lon2,lat2,1+int(dist/res))
+	gc_path.insert(0,(lon1,lat1))
+	gc_path.append((lon2,lat2))
+	gc_path_out = []
+	for i in range(len(gc_path)):
+		lon_out = gc_path[i][0]
+		if lon_out < 0.:
+			lon_out += 360.
+		gc_path_out.append((lon_out, gc_path[i][1]))
+	return gc_path_out,dist
+
+def get_ph_misfit(period,freqmin,freqmax,stacode1,stacode2,vel,indir='/work3/wang/JdF/Denoised_Stack'):
+	""" Calculate phase misfit between the positive and negative lags of a given cross-correlogram
+	
+	"""
+	xcorr_file = indir+'/'+stacode1+'/'+'COR_'+stacode1+'_'+stacode2+'.SAC'
+	if not os.path.isfile(xcorr_file): return 9999.9;
+	tr = obspy.core.read(xcorr_file)[0]
+	npts = tr.stats.sac.npts
+	delta = tr.stats.sac.delta
+	dist = tr.stats.sac.dist
+	L = int((npts-1)/2)+1
+	arrival = dist/vel
+	data_neg = tr.data[:L]
+	data_neg = data_neg[::-1]
+	data_pos = tr.data[L-1:]
+	#butter_b, butter_a = scipy.signal.butter(4,[freqmin*2*delta,freqmax*2*delta],btype='band')
+	#data_pos = scipy.signal.lfilter(butter_b,butter_a,data_pos)
+	#data_neg = scipy.signal.lfilter(butter_b,butter_a,data_neg)
+	ind0 = max(0, int((arrival-1*period)/delta))
+	ind1 = min(L, int((arrival+1*period)/delta))
+	window_length = ind1 - ind0
+	taper = cosine_taper(window_length,0.85)
+	ccp = data_pos[ind0:ind1]
+	ccp = scipy.signal.detrend(ccp, type='linear')
+	ccp *= taper
+	ccn = data_neg[ind0:ind1]
+	ccn = scipy.signal.detrend(ccn, type='linear')
+	ccn *= taper
+	ns = 1<<(ind1-ind0).bit_length()
+	fpos = scipy.fftpack.fft(ccp, n=ns)[:ns // 2]
+	fneg = scipy.fftpack.fft(ccn, n=ns)[:ns // 2]
+	fpos2 = np.real(fpos) ** 2 + np.imag(fpos) ** 2
+	fneg2 = np.real(fneg) ** 2 + np.imag(fneg) ** 2
+	X = fpos*(fneg.conj())
+	dpos = np.sqrt(fpos2)
+	dneg = np.sqrt(fneg2)
+	dcs = np.abs(X)
+	freq_vec = scipy.fftpack.fftfreq(len(X)*2, delta)[:ns // 2]
+	index_range = np.argwhere(np.logical_and(freq_vec>=freqmin, freq_vec<=freqmax))
+	n = len(dcs)
+	coh = np.zeros(n).astype('complex')
+	valids = np.argwhere(np.logical_and(np.abs(dpos)>0,np.abs(dneg)>0))
+	coh[valids] = dcs[valids] / (dpos[valids] * dneg[valids])
+	coh[coh > (1.+0j)] = 1.0+0j
+	w = 1./(1./(coh[index_range] ** 2)-1.)
+	w[coh[index_range] >= 0.99] = 1./ (1./0.9801 - 1.)
+	w = np.sqrt(w*np.sqrt(dcs[index_range]))
+	w = np.real(w)
+	v = np.real(freq_vec[index_range])*2*np.pi
+	phi = np.angle(X)
+	phi[0] = 0.
+	phi = np.unwrap(phi)
+	phi = phi[index_range]
+	m,_ = linear_regression(v.flatten(),phi.flatten(),w.flatten())
+	return m
