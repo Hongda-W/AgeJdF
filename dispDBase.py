@@ -422,9 +422,9 @@ class dispASDF(pyasdf.ASDFDataSet):
 				if T_V[3,ind_T] < 5. or T_V[4,ind_T] < 5.: # snr_p or snr_n smaller than 5.
 					continue
 				d_T = min(period/3, 2.)
-				time_delay = get_ph_misfit(period,1./(period+d_T),1./(period-d_T),stacode1,stacode2,T_V[1,ind_T])
-				if np.abs(time_delay) > 1. or np.abs(time_delay / period) > 0.2:
-					continue
+				# time_delay = get_ph_misfit(period,1./(period+d_T),1./(period-d_T),stacode1,stacode2,T_V[1,ind_T])
+				# if np.abs(time_delay) > 1. or np.abs(time_delay / period) > 0.2:
+					# continue
 				if T_V[2,ind_T]<T_V[1,ind_T]: #phase velocity smaller than group velocity
 					continue
 				V_lst.append(T_V[ind_V,ind_T])
@@ -458,6 +458,7 @@ class dispASDF(pyasdf.ASDFDataSet):
 		# params = (dist, d_dist, V, ages_lst)
 		cranges = (slice(0.5,4,0.1), slice(-0.5,0.5,0.05), slice(-1.,1,0.05))
 		resbrute = optimize.brute(sq_misfit,cranges,args=params,full_output=True,finish=None)
+		print("Age-depedent coefficients found for period {} sec.".format(period))
 		c0, c1, c2 = resbrute[0]
 		data_out = np.vstack((age_avgs[ind],V[ind])).T # [-1,2] array, storing average age and velocity
 		netcode1_lst_final = list(compress(netcode1_lst,ind))
@@ -612,16 +613,17 @@ class dispASDF(pyasdf.ASDFDataSet):
 			llons = llons[(llons>(lons[0]-2))*(llons<(lons[1]+2))]
 			etopoZ = m.transform_scalar(etopoz, llons-360*(llons>180)*np.ones(len(llons)), llats, etopoz.shape[0], etopoz.shape[1]) # tranform the altitude grid into the projected coordinate
 			ls = LightSource(azdeg=315, altdeg=45)
-			m.imshow(ls.hillshade(z, vert_exag=0.05),cmap='gray')
+			m.imshow(ls.hillshade(etopoZ, vert_exag=0.05),cmap='gray')
 		except IOError:
 			print("Couldn't read etopo data or color map file! Check file directory!")
 		
 		return
 	
-	def write_2_sta_in(self, outdir="/work3/wang/JdF/Input_4_Ray", pers = np.array([]), outpfx="2_sta_in_",):
+	def write_2_sta_in(self, outdir="/work3/wang/JdF/Input_4_Ray", channel='ZZ', pers = np.array([]), outpfx="2_sta_in_",cut=0.8):
 		""" Write the FTAN measurements as input files for 2-station tomography
 		Parameters: outdir -- directory for the generated input files
 		            outpfx -- prefix for the name of generated files
+		            cut    -- cut those lines in input file whose velocity differ more than this threshold from the mean or median
 		"""
 		if not os.path.isdir(outdir):
 			os.makedirs(outdir)
@@ -631,8 +633,8 @@ class dispASDF(pyasdf.ASDFDataSet):
 		ph_f_lst = []
 		gr_f_lst = []
 		for prd in pers:
-			ph_name = outdir+"/"+outpfx+"%g"%(prd)+"_ph.lst"
-			gr_name = outdir+"/"+outpfx+"%g"%(prd)+"_gr.lst"
+			ph_name = outdir+"/"+outpfx+"%g"%(prd)+"_"+channel+"_ph.lst_tmp"
+			gr_name = outdir+"/"+outpfx+"%g"%(prd)+"_"+channel+"_gr.lst_tmp"
 			ph_f = open(ph_name, 'w')
 			gr_f = open(gr_name, 'w')
 			ph_f_lst.append(ph_f)
@@ -681,6 +683,28 @@ class dispASDF(pyasdf.ASDFDataSet):
 			fgr = gr_f_lst[iper]
 			fph.close()
 			fgr.close()
+		from itertools import compress
+		for prd in pers:
+			in_ph_name = outdir+"/"+outpfx+"%g"%(prd)+"_"+channel+"_ph.lst_tmp"
+			in_gr_name = outdir+"/"+outpfx+"%g"%(prd)+"_"+channel+"_gr.lst_tmp"
+			fn_ph_name = outdir+"/"+outpfx+"%g"%(prd)+"_"+channel+"_ph.lst"
+			fn_gr_name = outdir+"/"+outpfx+"%g"%(prd)+"_"+channel+"_gr.lst"
+			with open(in_ph_name) as ph_f_tmp:
+				ph_V_arr = np.array(ph_f_tmp.read().split()[5::11],dtype='f')
+			ph_ind = np.logical_and(abs(ph_V_arr-ph_V_arr.mean()) < cut, abs(ph_V_arr-np.median(ph_V_arr)) < cut)
+			ph_lines_in = [line.rstrip('\n') for line in open(in_ph_name)]
+			ph_lines_fn = list(compress(ph_lines_in, ph_ind))
+			ph_fn = open (fn_ph_name,'w')
+			ph_fn.writelines('%s\n'%item for item in ph_lines_fn)
+			ph_fn.close()
+			with open(in_gr_name) as gr_f_tmp:
+				gr_V_arr = np.array(gr_f_tmp.read().split()[5::11],dtype='f')
+			gr_ind = np.logical_and(abs(gr_V_arr-gr_V_arr.mean()) < cut, abs(gr_V_arr-np.median(gr_V_arr)) < cut)
+			gr_lines_in = [line.rstrip('\n') for line in open(in_gr_name)]
+			gr_lines_fn = list(compress(gr_lines_in, gr_ind))
+			gr_fn = open (fn_gr_name,'w')
+			gr_fn.writelines('%s\n'%item for item in gr_lines_fn)
+			gr_fn.close()
 		print('End of Generating Misha Tomography Input File!')
 		return
 	
@@ -695,7 +719,7 @@ def sq_misfit(z,*params):
 	if not len(ages_lst)==dist.size & dist.size==d_dist.size & V.size==dist.size:
 			raise AttributeError('The number of inter-station paths are incompatible for inverting c0, c1 & c2')
 	t_path = np.zeros(dist.shape)
-	for i,ages in enumerate(ages_list):
+	for i,ages in enumerate(ages_lst):
 		age_avg = (ages[0:-1] + ages[1:])/2
 		d_d = np.repeat(d_dist[i], age_avg.size)
 		v_ages = c0+c1*np.sqrt(age_avg)+c2*age_avg

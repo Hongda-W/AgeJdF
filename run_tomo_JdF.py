@@ -1,0 +1,21 @@
+import raytomo
+import numpy as np
+dset = raytomo.RayTomoDataSet('./ray_tomo_JdF_ocean.h5')
+pers = np.append( np.arange(7.)*2.+6., np.arange(4.)*3.+20.)
+dset.set_input_parameters(minlon=228., maxlon=237., minlat=43., maxlat=50., pers=pers, data_pfx='2_sta_in_', smoothpfx='N_INIT_', qcpfx='QC_')
+#dset.run_smooth(datadir='/work3/wang/JdF/Input_4_Ray', outdir='./ray_tomo_working_dir_ocean',dlon=0.1, dlat=0.1, lengthcell=0.3)
+#dset.run_qc(outdir='./ray_tomo_working_dir_ocean', isotropic=True, dlon=0.1, dlat=0.1, lengthcell=0.3)
+#dset.run_qc(runid=1, outdir='./ray_tomo_working_dir', alpha=1000, sigma=200, isotropic=True, anipara=1, alphaAni4=1000)
+#dset.run_qc(runid=2, outdir='./ray_tomo_working_dir', dlon=0.1, dlat=0.1, alpha=1000, sigma=100, isotropic=True, anipara=1)
+ 
+#dset.get_data4plot(dataid='smooth_run_0', period=12.)
+dset.get_data4plot(dataid='qc_run_0', period=29.)
+#dset.plot_vel_iso(vmin=2.9, vmax=3.5, fastaxis=False, projection='global')
+#dset.plot_pdens()
+#dset.plot_vel_iso(vmin=1.25, vmax=2.4,hillshade=False)
+#dset.plot_vel_iso(hillshade=False)
+#dset.plot_residual(dataid='qc_run_0', period=30.)
+#dset.residual_per_station(dataid='qc_run_0', period=30., dist_lim=1.)
+#dset.plot_fast_axis()
+#dset.generate_corrected_map(dataid='qc_run_0', glbdir='./MAPS', outdir='./REG_MAPS')
+#dset.plot_global_map(period=50., inglbpfx='./MAPS/smpkolya_phv_R')
