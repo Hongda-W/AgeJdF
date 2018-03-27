@@ -120,7 +120,7 @@ class CompSurfVel(h5py.File):
 		dep_lon = dep_xyz[:,0].reshape(self['6_sec']['lonArr'].value.shape[::-1])
 		dep_lat = dep_xyz[:,1].reshape(self['6_sec']['lonArr'].value.shape[::-1])
 		dep_data = dep_xyz[:,2].reshape(self['6_sec']['lonArr'].value.shape[::-1])
-		if not ((self['6_sec']['lonArr'].value - dep_lon.T).sum() == 0 and (self['6_sec']['latArr'].value - dep_lat.T).sum() == 0):
+		if not ((self['6_sec']['lonArr'].value - dep_lon.T).sum() < 0.01 and (self['6_sec']['latArr'].value - dep_lat.T).sum() < 0.01):
 			raise AttributeError('The local etopo file is not compatible with the tomography result')
 		for period in self.attrs['prd_arr']:
 			group = self['%g_sec'%( period )]
@@ -226,7 +226,7 @@ class CompSurfVel(h5py.File):
 			m.imshow(ls.hillshade(etopoZ, vert_exag=1.),cmap='gray')
 		return m	
 
-	def plot_age(self,period=6., projection='lambert',geopolygons=None, showfig=True, vmin=0, vmax=None, hillshade=True):
+	def plot_age(self,period=6., projection='lambert',geopolygons=None, showfig=True, vmin=0, vmax=None, hillshade=False):
 		"""Plot age map
 		"""
 		if hillshade:
@@ -256,7 +256,7 @@ class CompSurfVel(h5py.File):
 			plt.show()
 		return
 	
-	def plot_sed(self,period=6.,projection='lambert',geopolygons=None, showfig=True, vmin=0, vmax=None, hillshade=True):
+	def plot_sed(self,period=6.,projection='lambert',geopolygons=None, showfig=True, vmin=0, vmax=None, hillshade=False):
 		"""Plot sedimentary thickness map
 		"""
 		if hillshade:
@@ -286,6 +286,35 @@ class CompSurfVel(h5py.File):
 			plt.show()
 		return
 	
+	def plot_dep(self,period=6.,projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, hillshade=False):
+		"""Plot water depth map
+		"""
+		if hillshade:
+			alpha = 0.5
+		else:
+			alpha =1.
+		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
+		group = self['%g_sec'%( period )]
+		x, y = m(group['lonArr'].value, group['latArr'].value)
+		my_cmap = pycpt.load.gmtColormap('/work3/wang/code_bkup/ToolKit/Models/ETOPO1/ETOPO1.cpt')
+		dep_Arr = group['dep_Arr'].value
+		if vmin == None:
+			vmin = np.nanmin(dep_Arr)
+			vmin = np.floor(vmin/100.)*100.
+		if vmax == None:
+			vmax = np.nanmax(dep_Arr)
+			vmax = np.ceil(vmax/100.)*100.
+		im = m.pcolormesh(x, y, dep_Arr, cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%d')
+		cb.set_label('Topography (m)', fontsize=12, rotation=0)
+		cb.set_alpha(1)
+		cb.draw_all()
+		ax = plt.gca() # only plot the oceanic part for JdF
+		# ax.set_xlim(right=x_max)
+		if showfig:
+			plt.show()
+		return
+
 	def plot_tomo_vel(self, period=6., projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, sta=True, hillshade=False):
 		"""Plot velocity map from tomography result
 		"""
