@@ -1,0 +1,14 @@
+# GMT common arguments shelf
+-Ba400f100:Lag Time(sec):/a200/f50:Distance (km):WeSn
+-JX8/-10
+-Jx1
+-R-800/800/0/600
+-X-9
+-x9.8
+-Y12
+-y0
+-jX8/-10
+EOF
+
+OF
+

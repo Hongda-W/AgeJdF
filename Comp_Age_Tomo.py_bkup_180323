@@ -1,0 +1,402 @@
+"""
+Compare the 2-station tomography result with the age-dependent velocity result
+to see if the surface wave velocity in the oceanic plate is age-dependent.
+"""
+import dispDBase
+import raytomo
+import numpy as np
+from mpl_toolkits.basemap import Basemap, shiftgrid, cm
+import pycpt
+import obspy
+from obspy.geodetics import locations2degrees, degrees2kilometers
+import matplotlib.pyplot as plt
+from scipy.interpolate import Rbf
+from matplotlib.path import Path
+import h5py
+
+class CompSurfVel(h5py.File):
+	
+	def _init_parameters(self,period):
+		"""Initiate several parameters
+		"""
+		self.tomo_f='./ray_tomo_JdF_ocean.h5'
+		self.age_h5='./age_model_180321.h5'
+		self.dataid = 'qc_run_0' #dataid in the .h5 file for the dataset of interest
+		self.poly_lst = [(360.-126.729,49.292),(360.-125.021,48.105),(360.-124.299,44.963),(360.-124.7,43.203),\
+			(360.-126.545,43.586),(360.-131.406,44.8),(360.-130.97,47.),(360.-129.821,49.12)]
+		self.minlat = 43.
+		self.maxlat = 50.
+		self.minlon = 227.
+		self.maxlon = 238.
+		self.period = period
+		self.latArr = np.array([])
+		self.lonArr = np.array([])
+		self.age_Arr = np.array([])
+		self.age_vel = np.array([])
+		self.tomo_data = np.array([])
+		self.res_data = np.array([])
+		self.sed_Arr = np.array([])
+		try:
+			self.Rbf_func
+		except:
+			self._get_Rbf_func()
+		return
+	
+	def _get_Rbf_func(self,sed_file='/work3/wang/code_bkup/ToolKit/Models/SedThick/sedthick_world_v2.xyz'):
+		thk_xyz = np.loadtxt(sed_file)
+		lat_pss = np.logical_and(thk_xyz[:,1]>self.minlat, thk_xyz[:,1]<self.maxlat)
+		lon_pss = np.logical_and(thk_xyz[:,0]>self.minlon, thk_xyz[:,0]<self.maxlon)
+		pss = np.logical_and(lat_pss, lon_pss)
+		sed_lat = thk_xyz[:,1][pss]
+		sed_lon = thk_xyz[:,0][pss]
+		sed_thk = thk_xyz[:,2][pss]
+		self.Rbf_func = Rbf(sed_lat,sed_lon,sed_thk,norm=cal_dist)
+		pass
+		
+	def get_tomo_data(self,threshold=20.):
+		"""Get tomography dataset from h5 file
+		Parameters:
+		tomo_f        --  h5 file that contains the tomography results
+		period        --  period of interest
+		threshold     --  path density threshold for forming mask
+		"""
+		dset = raytomo.RayTomoDataSet(self.tomo_f)
+		dset.get_data4plot(dataid=self.dataid, period=self.period)
+		pdens = dset.pdens
+		mask_pdens = dset.pdens < threshold
+		self.tomo_data = np.ma.masked_array(dset.vel_iso, mask=mask_pdens)
+		self.latArr = dset.latArr
+		self.lonArr = dset.lonArr
+		return
+	
+	def get_res_data(self):
+		dset = raytomo.RayTomoDataSet(self.tomo_f)
+		self.res_data = dset[self.dataid+'/%g_sec'%( self.period )]['residual'].value
+		return
+	
+	def get_age_arr(self):
+		"""Get age array for the grids of the tomography result
+		"""
+		dset = dispDBase.dispASDF(self.age_h5)
+		dset.set_poly(self.poly_lst,self.minlon,self.minlat,self.maxlon,self.maxlat)
+		dset.read_age_mdl()
+		lons = self.lonArr.reshape(self.lonArr.size)
+		lats = self.latArr.reshape(self.latArr.size)
+		cords_vec = np.vstack((lats,lons)).T
+		age_Arr = dset.get_ages(cords_vec).reshape(self.latArr.shape)
+		mask_age = age_Arr > 180.
+		self.age_Arr = np.ma.masked_array(age_Arr,mask=mask_age)
+		return
+		
+	def get_sed_thk(self):
+		"""Get the sediment thickness for the grids of the romography result
+		"""
+		sed_Arr = self.Rbf_func(self.latArr, self.lonArr)
+		m = self._get_basemap(projection='lambert', geopolygons=None,hillshade=False)
+		x, y = m(self.lonArr, self.lonArr)
+		locations = np.c_[x.reshape(x.size), y.reshape(y.size)]
+		polygons = [Path(p.boundary) for p in m.landpolygons]
+		mask = np.zeros(len(locations), dtype=bool)
+		for polygon in polygons:
+			mask += np.array(polygon.contains_points(locations))
+		self.sed_Arr = np.ma.MaskedArray(sed_Arr,mask=mask) # The mask doesn't work
+		pass
+	
+	
+	def get_c(self,wave='phase'):
+		"""Ger c0, c1, c2 for the given period
+		"""
+		dset = dispDBase.dispASDF(self.age_h5)
+		# dset = dispDBase.dispASDF('age_model_new.h5')
+		str_per = str(int(self.period)).zfill(2)
+		c_dic = dset.auxiliary_data.FitResult[str_per][wave].parameters
+		self.c0 = c_dic['c0']
+		self.c1 = c_dic['c1']
+		self.c2 = c_dic['c2']
+		self.age_vel = self.c0 + self.c1*np.sqrt(self.age_Arr) + self.c2*self.age_Arr
+		return
+	
+	def _get_basemap(self, projection='lambert', geopolygons=None, resolution='i', bound=True, hillshade=False):
+		"""Get basemap for plotting results
+		"""
+		# fig=plt.figure(num=None, figsize=(12, 12), dpi=80, facecolor='w', edgecolor='k')
+		minlon=self.minlon
+		maxlon=self.maxlon
+		minlat=self.minlat
+		maxlat=self.maxlat
+		lat_centre = (maxlat+minlat)/2.0
+		lon_centre = (maxlon+minlon)/2.0
+		if projection=='merc':
+			m=Basemap(projection='merc', llcrnrlat=minlat-5., urcrnrlat=maxlat+5., llcrnrlon=minlon-5.,
+					  urcrnrlon=maxlon+5., lat_ts=20, resolution=resolution)
+			# m.drawparallels(np.arange(minlat,maxlat,dlat), labels=[1,0,0,1])
+			# m.drawmeridians(np.arange(minlon,maxlon,dlon), labels=[1,0,0,1])
+			m.drawparallels(np.arange(-80.0,80.0,2.0), dashes=[2,2], labels=[1,0,0,0], fontsize=12)
+			m.drawmeridians(np.arange(-170.0,170.0,2.0), dashes=[2,2], labels=[0,0,1,0], fontsize=12)
+			m.drawstates(color='g', linewidth=2.)
+		elif projection=='global':
+			m=Basemap(projection='ortho',lon_0=lon_centre, lat_0=lat_centre, resolution=resolution)
+			# m.drawparallels(np.arange(-80.0,80.0,10.0), labels=[1,0,0,1])
+			# m.drawmeridians(np.arange(-170.0,170.0,10.0), labels=[1,0,0,1])
+		elif projection=='regional_ortho':
+			m1 = Basemap(projection='ortho', lon_0=minlon, lat_0=minlat, resolution='l')
+			m = Basemap(projection='ortho', lon_0=minlon, lat_0=minlat, resolution=resolution,\
+				llcrnrx=0., llcrnry=0., urcrnrx=m1.urcrnrx/mapfactor, urcrnry=m1.urcrnry/3.5)
+			m.drawparallels(np.arange(-80.0,80.0,10.0), labels=[1,0,0,0],  linewidth=2,  fontsize=20)
+			# m.drawparallels(np.arange(-90.0,90.0,30.0),labels=[1,0,0,0], dashes=[10, 5], linewidth=2,  fontsize=20)
+			# m.drawmeridians(np.arange(10,180.0,30.0), dashes=[10, 5], linewidth=2)
+			m.drawmeridians(np.arange(-170.0,170.0,10.0),  linewidth=2)
+		elif projection=='lambert':
+			distEW, az, baz=obspy.geodetics.gps2dist_azimuth(minlat, minlon, minlat, maxlon) # distance is in m
+			distNS, az, baz=obspy.geodetics.gps2dist_azimuth(minlat, minlon, maxlat+2., minlon) # distance is in m
+			m = Basemap(width=distEW, height=distNS, rsphere=(6378137.00,6356752.3142), resolution='l', projection='lcc',\
+				lat_1=minlat, lat_2=maxlat, lon_0=lon_centre, lat_0=lat_centre)
+			m.drawparallels(np.arange(-80.0,80.0,2.0), linewidth=1, dashes=[2,2], labels=[1,0,0,0], fontsize=12)
+			m.drawmeridians(np.arange(-170.0,170.0,2.0), linewidth=1, dashes=[2,2], labels=[0,0,1,0], fontsize=12)
+			# m.drawparallels(np.arange(-80.0,80.0,10.0), linewidth=0.5, dashes=[2,2], labels=[1,0,0,0], fontsize=5)
+			# m.drawmeridians(np.arange(-170.0,170.0,10.0), linewidth=0.5, dashes=[2,2], labels=[0,0,0,1], fontsize=5)
+		m.drawcoastlines(linewidth=1.0)
+		m.drawcountries(linewidth=1.0)
+		m.drawstates(linewidth=1.0)
+		# m.drawmapboundary(fill_color=[1.0,1.0,1.0])
+		# m.fillcontinents(lake_color='#99ffff',zorder=0.2)
+		# m.drawlsmask(land_color='0.8', ocean_color='#99ffff')
+		m.drawmapboundary(fill_color="white")
+		if bound:
+			try:
+				# m.readshapefile('/projects/howa1663/Code/ToolKit/Models/Plates/PB2002_boundaries', name='PB2002_boundaries', drawbounds=True, linewidth=1, color='orange') # draw plate boundary on basemap
+				m.readshapefile('/work3/wang/code_bkup/AgeJdF/Plates/PB2002_boundaries', name='PB2002_boundaries', drawbounds=True, \
+						linewidth=1, color='orange')
+			except IOError:
+				print("Couldn't read shape file! Continue without drawing plateboundaries")
+		try:
+			geopolygons.PlotPolygon(inbasemap=m)
+		except:
+			pass
+		if hillshade:
+			from netCDF4 import Dataset
+			from matplotlib.colors import LightSource
+			etopo1 = Dataset('/work2/wang/Code/ToolKit/ETOPO1_Ice_g_gmt4.grd','r')
+			zz = etopo1.variables["z"][:]
+			llons = etopo1.variables["x"][:]
+			west = llons<0 # mask array with negetive longitudes
+			west = 360.*west*np.ones(len(llons))
+			llons = llons+west
+			llats = etopo1.variables["y"][:]
+			etopoz = zz[(llats>(minlat-2))*(llats<(maxlat+2)), :]
+			etopoz = etopoz[:, (llons>(minlon-2))*(llons<(maxlon+2))]
+			llats = llats[(llats>(minlat-2))*(llats<(maxlat+2))]
+			llons = llons[(llons>(minlon-2))*(llons<(maxlon+2))]
+			ls = LightSource(azdeg=315, altdeg=45)
+			etopoZ = m.transform_scalar(etopoz, llons-360*(llons>180)*np.ones(len(llons)), llats, etopoz.shape[0], etopoz.shape[1])
+			ls = LightSource(azdeg=315, altdeg=45)
+			m.imshow(ls.hillshade(etopoZ, vert_exag=1.),cmap='gray')
+		return m	
+
+	def plot_age(self,projection='lambert',geopolygons=None, showfig=True, vmin=0, vmax=None, hillshade=True):
+		"""Plot age map
+		"""
+		if hillshade:
+			alpha = 0.5
+		else:
+			alpha =1.
+		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
+		x, y = m(self.lonArr, self.latArr)
+		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
+		if vmin == None:
+			vmin = np.nanmin(self.age_Arr.data[~self.age_Arr.mask])
+			vmin = np.floor(vmin/5.)*5.
+		if vmax == None:
+			vmax = np.nanmax(self.age_Arr.data[~self.age_Arr.mask])
+			vmax = np.ceil(vmax/5.)*5.
+		im = m.pcolormesh(x, y, self.age_Arr, cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%.2f')
+		cb.set_label('Age (Ma)', fontsize=12, rotation=0)
+		cb.set_alpha(1)
+		cb.draw_all()
+		ax = plt.gca() # only plot the oceanic part for JdF
+		# ax.set_xlim(right=x_max)
+		if showfig:
+			plt.show()
+		return
+	
+	def plot_sed(self,projection='lambert',geopolygons=None, showfig=True, vmin=0, vmax=None, hillshade=True):
+		"""Plot sedimentary thickness map
+		"""
+		if hillshade:
+			alpha = 0.5
+		else:
+			alpha =1.
+		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
+		x, y = m(self.lonArr, self.latArr)
+		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
+		if vmin == None:
+			vmin = np.nanmin(self.sed_Arr.data[~self.sed_Arr.mask])
+			vmin = np.floor(vmin/5.)*5.
+		if vmax == None:
+			vmax = np.nanmax(self.sed_Arr.data[~self.sed_Arr.mask])
+			vmax = np.ceil(vmax/5.)*5.
+		im = m.pcolormesh(x, y, self.sed_Arr, cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%.2f')
+		cb.set_label('Sediment thickness (m)', fontsize=12, rotation=0)
+		cb.set_alpha(1)
+		cb.draw_all()
+		ax = plt.gca() # only plot the oceanic part for JdF
+		# ax.set_xlim(right=x_max)
+		if showfig:
+			plt.show()
+		return
+	
+	def plot_tomo_vel(self, projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, sta=True, hillshade=False):
+		"""Plot velocity map from tomography result
+		"""
+		if hillshade:
+			alpha = 0.5
+		else:
+			alpha =1.
+		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
+		x, y = m(self.lonArr, self.latArr)
+		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
+		if vmin == None:
+			vmin = np.nanmin(self.tomo_data[~self.tomo_data.mask])
+			vmin = np.ceil(vmin*20.)/20.
+		if vmax == None:
+			vmax = np.nanmax(self.tomo_data[~self.tomo_data.mask])
+			vmax = np.floor(vmax*20.)/20.
+		im = m.pcolormesh(x, y, self.tomo_data, cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%.2f')
+		cb.set_label('vel (km/s)', fontsize=12, rotation=0)
+		cb.set_alpha(1)
+		cb.draw_all()
+		ax = plt.gca() # only plot the oceanic part for JdF
+		if sta:
+			self.sta_on_plot(ax,m)
+		# ax.set_xlim(right=x_max)
+		fig = plt.gcf()
+		fig.suptitle(str(self.period)+' sec', fontsize=14,y=0.95)
+		if showfig:
+			plt.show()
+		pass
+	
+	def plot_age_vel(self, projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, sta=True, hillshade=False):
+		"""Plot age-dependent velocity map
+		"""
+		if hillshade:
+			alpha = 0.5
+		else:
+			alpha =1.
+		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
+		x, y = m(self.lonArr, self.latArr)
+		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
+		if vmin == None:
+			vmin = np.nanmin(self.age_vel[~self.age_vel.mask])
+			vmin = np.ceil(vmin*20.)/20.
+		if vmax == None:
+			vmax = np.nanmax(self.age_vel[~self.age_vel.mask])
+			vmax = np.floor(vmax*20.)/20.
+		im = m.pcolormesh(x, y, self.age_vel, cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%.2f')
+		cb.set_label('vel (km/s)', fontsize=12, rotation=0)
+		cb.set_alpha(1)
+		cb.draw_all()
+		ax = plt.gca() # only plot the oceanic part for JdF
+		if sta:
+			self.sta_on_plot(ax,m)
+		# ax.set_xlim(right=x_max)
+		fig = plt.gcf()
+		fig.suptitle(str(self.period)+' sec', fontsize=14,y=0.95)
+		if showfig:
+			plt.show()
+		pass
+
+	def plot_diff(self,projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, sta=True, hillshade=False, pct=True):
+		"""Plot the difference between tomography result and age-dependent velocity map
+		"""
+		mask = np.logical_or(self.age_vel.mask, self.tomo_data.mask)
+		if pct:
+			data = (self.tomo_data - self.age_vel) / self.age_vel*100
+			cb_label = 'vel difference (%)'
+		else:
+			data = self.tomo_data - self.age_vel
+			cb_label = 'vel difference (km/s)'
+		plt_data = np.ma.masked_array(data, mask=mask)
+		if hillshade:
+			alpha = 0.5
+		else:
+			alpha =1.
+		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
+		x, y = m(self.lonArr, self.latArr)
+		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
+		if vmin == None:
+			vmin = np.nanmin(plt_data[~mask])
+			vmin = np.ceil(vmin*20.)/20.
+		if vmax == None:
+			vmax = np.nanmax(plt_data[~mask])
+			vmax = np.floor(vmax*20.)/20.
+		im = m.pcolormesh(x, y, plt_data, cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%.2f')
+		cb.set_label(cb_label, fontsize=12, rotation=0)
+		cb.set_alpha(1)
+		cb.draw_all()
+		ax = plt.gca() # only plot the oceanic part for JdF
+		# ax.set_xlim(right=x_max)
+		if sta:
+			self.sta_on_plot(ax,m)
+		fig = plt.gcf()
+		fig.suptitle(str(self.period)+' sec', fontsize=14,y=0.95)
+		if showfig:
+			plt.show()
+		pass
+	
+	def plot_age_curve(self,showfig=True):
+		"""Plot vel vs. age for the tomography result
+		"""
+		mask = np.logical_or(self.tomo_data.mask, self.age_Arr.mask)
+		vel_vec = self.tomo_data[~mask]
+		age_vec = self.age_Arr[~mask]
+		plt.plot(age_vec, vel_vec, 'r.')
+		plt.xlim(xmin=0)
+		ages = np.linspace(0,age_vec.max(),100)
+		vels = self.c0+self.c1*np.sqrt(ages)+self.c2*ages
+		plt.plot(age_vec, vel_vec, 'r.')
+		plt.plot(ages, vels, 'b-')
+		plt.xlabel('Age (Ma)', fontsize=14)
+		plt.ylabel('vel (km/s)', fontsize=14)
+		fig.suptitle(str(self.period)+' sec', fontsize=14)
+		if showfig:
+			plt.show()
+		pass
+	
+	def sta_on_plot(self,ax,basemap,ms=6):
+		"""Add stations on plot
+		"""
+		if self.res_data.size == 0:
+			self.get_res_data()
+		cords1 = self.res_data[:,1:3]
+		cords2 = self.res_data[:,3:5]
+		sta_cords,cnts = np.unique(np.concatenate((cords1,cords2),axis=0), return_counts=True, axis=0)
+		x, y = basemap(sta_cords[:,1], sta_cords[:,0])
+		ax.plot(x,y,'^', color='gray',alpha=.5, ms=ms)
+		pass
+	
+def cal_dist(origs,dests):
+	""" Calculate the great-circle distance between points on geographic map
+	Parameters:
+		origs -- 2*N array, with row 0 latitude, row 1 longitude
+		dests -- 2*N array, with row 0 latitude, row 1 longitude
+	"""
+	radius = 6371.009 # km
+	if origs.ndim:
+		lat1, lon1 = origs
+		lat2, lon2 = dests
+	else:
+		lat1 = origs[0,:]
+		lon1 = origs[1,:]
+		lat2 = dests[0,:]
+		lon2 = dests[1,:]
+	dlat = (lat2-lat1) / 180. * np.pi
+	dlon = (lon2-lon1) / 180. * np.pi
+	a = np.sin(dlat/2) * np.sin(dlat/2) + np.cos(lat1 / 180. * np.pi) \
+		* np.cos(lat2 / 180. * np.pi) * np.sin(dlon/2) * np.sin(dlon/2)
+	c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+	return radius * c

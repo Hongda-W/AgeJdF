@@ -1,0 +1,49 @@
+Protocol: itomo_sp_cu_s_2, v1.4.1
+==============================
+ PERIOD= 8 (sec)
+ INFILE=./ray_tomo_working_dir_ocean/8_ph/QC_8_R_ph.lst
+ OUTFILE=./ray_tomo_working_dir_ocean/8_ph/QC_500_30_50
+ model= N 
+ weights= N 
+ resolution= Y
+ selection= N
+ percent_map= Y
+ rejection= N
+ reject_delta= N
+ residuals= Y
+ geogr-->geoc= Y
+ geoc-->geogr= Y
+ Contour file name is: contour.ctr
+ Gaussian cutting acuracy, pow=  8.0
+ Regularization parameter 1 (alpha1) are:  50.0000
+ Regularization parameter 2 (alpha2) are:  500.000
+ Radius of correlation (sigma1) are:   30.000
+ MAX Radius of correlation (sigma2) are:   30.000
+ Limits of latitude:       43.00      50.00  Increment= 0.100 npoints=   71
+ Limits of longitude:     228.00     237.00  Increment= 0.100 npoints=   91
+ Step of integration: 0.2500 (deg)
+=================================================================
+ There were    369 paths; only     369 paths left
+ Square root mean velocity=   2.782 (km/sec)
+Input        Time:  0h  0m  0s     0s
+ Average square of cells is:     0.0896074958 (deg**2)
+ Average length of cells is:     0.2993451115 (deg)
+ Point outside contour: Lat=   0.000 Lon=    0.000
+ Normalization factor :  0.14801
+ Cells:       460376 , nm=        1541  nd+1=         278
+ Number of integrals are:          369
+ SQRT of initial residuals dispersion are:     7.602 /     7.602 / (sec)
+ SQ_RT of initial velocities dispersion are:   0.29016 (km/sec)
+Integrals    Time:***h 53m 30s******s
+ MAXIMUM of asimutal parameter is :    134.100006    
+Gauss        Time:***h 53m 34s******s
+ Matrix is calculated
+ Matrix elements:     2374681  Zero are:     1976070
+ Maximum intersections/cell are:    343.118958    
+ Trace F/Size      3912.1548
+Inversion    Time:***h 53m 40s******s
+ Matrix condition =    0.117231E-01
+ SQRT of final residuals dispersion are:     2.015 /     2.015 / (sec)
+ SQ_RT of final velocities dispersion are:   0.09369 (km/sec)
+Velocities   Time:***h 53m 40s******s
+ average velocity for %-map ./ray_tomo_working_dir_ocean/8_ph/QC_500_30_50_8.1_%_ =     2.77915 (km/sec), npoints on a grid=   6461

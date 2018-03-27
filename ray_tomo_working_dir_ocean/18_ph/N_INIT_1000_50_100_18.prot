@@ -1,0 +1,49 @@
+Protocol: itomo_sp_cu_s_2, v1.4.1
+==============================
+ PERIOD= 18 (sec)
+ INFILE=/work3/wang/JdF/Input_4_Ray/2_sta_in_18_ZZ_ph.lst
+ OUTFILE=./ray_tomo_working_dir_ocean/18_ph/N_INIT_1000_50_100
+ model= N 
+ weights= N 
+ resolution= Y
+ selection= N
+ percent_map= Y
+ rejection= N
+ reject_delta= N
+ residuals= Y
+ geogr-->geoc= Y
+ geoc-->geogr= Y
+ Contour file name is: contour.ctr
+ Gaussian cutting acuracy, pow=  8.0
+ Regularization parameter 1 (alpha1) are: 100.0000
+ Regularization parameter 2 (alpha2) are: 1000.000
+ Radius of correlation (sigma1) are:   50.000
+ MAX Radius of correlation (sigma2) are:   50.000
+ Limits of latitude:       43.00      50.00  Increment= 0.100 npoints=   71
+ Limits of longitude:     228.00     237.00  Increment= 0.100 npoints=   91
+ Step of integration: 0.5000 (deg)
+=================================================================
+ There were    620 paths; only     620 paths left
+ Square root mean velocity=   3.788 (km/sec)
+Input        Time:  0h  0m  0s     0s
+ Average square of cells is:     0.0896074958 (deg**2)
+ Average length of cells is:     0.2993451115 (deg)
+ Point outside contour: Lat=   0.000 Lon=    0.000
+ Normalization factor :  0.14801
+ Cells:       460376 , nm=        1541  nd+1=         278
+ Number of integrals are:          620
+ SQRT of initial residuals dispersion are:     1.902 /     1.902 / (sec)
+ SQ_RT of initial velocities dispersion are:   0.09332 (km/sec)
+Integrals    Time:***h 52m 10s******s
+ MAXIMUM of asimutal parameter is :    135.000000    
+Gauss        Time:***h 52m 14s******s
+ Matrix is calculated
+ Matrix elements:     2374681  Zero are:     1408752
+ Maximum intersections/cell are:    438.740570    
+ Trace F/Size     19649.8027
+Inversion    Time:***h 52m 20s******s
+ Matrix condition =    0.435841E-02
+ SQRT of final residuals dispersion are:     1.648 /     1.648 / (sec)
+ SQ_RT of final velocities dispersion are:   0.07538 (km/sec)
+Velocities   Time:***h 52m 20s******s
+ average velocity for %-map ./ray_tomo_working_dir_ocean/18_ph/N_INIT_1000_50_100_18.1_%_ =     3.78336 (km/sec), npoints on a grid=   6461

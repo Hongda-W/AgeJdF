@@ -10,80 +10,153 @@ import pycpt
 import obspy
 from obspy.geodetics import locations2degrees, degrees2kilometers
 import matplotlib.pyplot as plt
+from scipy.interpolate import Rbf, interp2d
+from matplotlib.path import Path
+import h5py
 
-class CompSurfVel:
+class CompSurfVel(h5py.File):
 	
-	def __init__(self,period=6.):
+	def _init_parameters(self,pers=np.array([])):
 		"""Initiate several parameters
 		"""
-		self.tomo_f='./ray_tomo_JdF_ocean.h5'
-		self.age_h5='./age_model_1803.h5'
+		self.attrs.create(name = 'tomo_f', data = np.string_('./ray_tomo_JdF_ocean.h5'))
+		self.attrs.create(name = 'dataid', data = np.string_('qc_run_0')) #dataid in the ray_tomo*.h5 file for the dataset of interest
+		self.attrs.create(name = 'age_h5', data = np.string_('./age_model_1803.h5'))
+		self.attrs.create(name = 'minlon', data = 227., dtype='f')
+		self.attrs.create(name = 'maxlon', data = 238., dtype='f')
+		self.attrs.create(name = 'minlat', data = 43., dtype='f')
+		self.attrs.create(name = 'maxlat', data = 50., dtype='f')
+		if pers.size==0:
+			pers = np.append( np.arange(7.)*2.+6., np.arange(4.)*3.+20.)
+		for per in pers:
+			self.create_group(name='%g_sec'%( per ))
+		self.attrs.create(name = 'prd_arr', data = pers, dtype='f')
 		self.poly_lst = [(360.-126.729,49.292),(360.-125.021,48.105),(360.-124.299,44.963),(360.-124.7,43.203),\
 			(360.-126.545,43.586),(360.-131.406,44.8),(360.-130.97,47.),(360.-129.821,49.12)]
-		self.minlat = 43.
-		self.maxlat = 50.
-		self.minlon = 227.
-		self.maxlon = 238.
-		self.period = period
-		self.latArr = np.array([])
-		self.lonArr = np.array([])
-		self.age_Arr = np.array([])
-		self.age_vel = np.array([])
-		self.tomo_data = np.array([])
+		try:
+			self.Rbf_func
+		except:
+			self._get_Rbf_func()
 		return
 	
-	def get_tomo_data(self,dataid='qc_run_0',threshold=20.):
+	def _get_Rbf_func(self,sed_file='/work3/wang/code_bkup/ToolKit/Models/SedThick/sedthick_world_v2.xyz'):
+		thk_xyz = np.loadtxt(sed_file)
+		minlat = self.attrs['minlat']
+		maxlat = self.attrs['maxlat']
+		minlon = self.attrs['minlon']
+		maxlon = self.attrs['maxlon']
+		lat_pss = np.logical_and(thk_xyz[:,1]>minlat, thk_xyz[:,1]<maxlat)
+		lon_pss = np.logical_and(thk_xyz[:,0]>minlon, thk_xyz[:,0]<maxlon)
+		pss = np.logical_and(lat_pss, lon_pss)
+		sed_lat = thk_xyz[:,1][pss]
+		sed_lon = thk_xyz[:,0][pss]
+		sed_thk = thk_xyz[:,2][pss]
+		self.Rbf_func = Rbf(sed_lat,sed_lon,sed_thk,norm=cal_dist)
+		pass
+		
+	def get_tomo_data(self,threshold=20.):
 		"""Get tomography dataset from h5 file
 		Parameters:
 		tomo_f        --  h5 file that contains the tomography results
-		dataid        --  dataid in the .h5 file for the dataset of interest
 		period        --  period of interest
 		threshold     --  path density threshold for forming mask
 		"""
-		dset = raytomo.RayTomoDataSet(self.tomo_f)
-		dset.get_data4plot(dataid=dataid, period=self.period)
-		pdens = dset.pdens
-		mask_pdens = dset.pdens < threshold
-		self.tomo_data = np.ma.masked_array(dset.vel_iso, mask=mask_pdens)
-		self.latArr = dset.latArr
-		self.lonArr = dset.lonArr
+		dset = raytomo.RayTomoDataSet(self.attrs['tomo_f'])
+		for prd in self.attrs['prd_arr']:
+			group = self['%g_sec'%( prd )]
+			dset.get_data4plot(dataid=self.attrs['dataid'].decode('utf-8'), period=prd)
+			pdens = dset.pdens
+			mask_pdens = dset.pdens < threshold
+			tomo_data = np.ma.masked_array(dset.vel_iso, mask=mask_pdens)
+			group.create_dataset(name='tomo_data', data=dset.vel_iso) # phase velocity map
+			group.create_dataset(name='tomo_data_msk', data=mask_pdens) # save the mask array seperately. h5 file doesn't support masked array
+			group.create_dataset(name='latArr', data=dset.latArr)
+			group.create_dataset(name='lonArr', data=dset.lonArr)
+		return
+	
+	def get_res_data(self):
+		dset = raytomo.RayTomoDataSet(self.attrs['tomo_f'])
+		for period in self.attrs['prd_arr']:
+			group = self['%g_sec'%( period )]
+			group.create_dataset(name='res_data', data=dset[self.attrs['dataid'].decode('utf-8')+'/%g_sec'%( period )]['residual'].value)
 		return
 	
 	def get_age_arr(self):
 		"""Get age array for the grids of the tomography result
 		"""
-		dset = dispDBase.dispASDF(self.age_h5)
-		dset.set_poly(self.poly_lst,self.minlon,self.minlat,self.maxlon,self.maxlat)
+		dset = dispDBase.dispASDF(self.attrs['age_h5'])
+		minlat = self.attrs['minlat']
+		maxlat = self.attrs['maxlat']
+		minlon = self.attrs['minlon']
+		maxlon = self.attrs['maxlon']
+		dset.set_poly(self.poly_lst,minlon,minlat,maxlon,maxlat)
 		dset.read_age_mdl()
-		lons = self.lonArr.reshape(self.lonArr.size)
-		lats = self.latArr.reshape(self.latArr.size)
-		cords_vec = np.vstack((lats,lons)).T
-		age_Arr = dset.get_ages(cords_vec).reshape(self.latArr.shape)
-		mask_age = age_Arr > 180.
-		self.age_Arr = np.ma.masked_array(age_Arr,mask=mask_age)
+		for period in self.attrs['prd_arr']:
+			group = self['%g_sec'%( period )]
+			lons_orig = group['lonArr'].value
+			lons = lons_orig.reshape(lons_orig.size)
+			lats = group['latArr'].value.reshape(lons_orig.size)
+			cords_vec = np.vstack((lats,lons)).T
+			age_Arr = dset.get_ages(cords_vec).reshape(lons_orig.shape)
+			mask_age = age_Arr > 180.
+			group.create_dataset(name='age_Arr', data=age_Arr)
+			group.create_dataset(name='age_Arr_msk', data=mask_age)
 		return
+		
+	def get_sed_thk(self):
+		"""Get the sediment thickness for the grids of the tomography result
+		"""
+		for period in self.attrs['prd_arr']:
+			group = self['%g_sec'%( period )]
+			sed_Arr = self.Rbf_func(group['latArr'].value, group['lonArr'].value)
+			group.create_dataset(name='sed_Arr', data=sed_Arr)
+			group.create_dataset(name='sed_Arr_msk', data=group['tomo_data_msk'].value)
+		pass
+	
+	def get_wtr_dep(self,dep_f='./etopo.xyz'):
+		""" Get water depth for the grids of the tomography result
+		"""
+		dep_xyz = np.loadtxt(dep_f)
+		dep_lon = dep_xyz[:,0].reshape(self['6_sec']['lonArr'].value.shape[::-1])
+		dep_lat = dep_xyz[:,1].reshape(self['6_sec']['lonArr'].value.shape[::-1])
+		dep_data = dep_xyz[:,2].reshape(self['6_sec']['lonArr'].value.shape[::-1])
+		if not ((self['6_sec']['lonArr'].value - dep_lon.T).sum() == 0 and (self['6_sec']['latArr'].value - dep_lat.T).sum() == 0):
+			raise AttributeError('The local etopo file is not compatible with the tomography result')
+		for period in self.attrs['prd_arr']:
+			group = self['%g_sec'%( period )]
+			dep_Arr = dep_data.T
+			group.create_dataset(name='dep_Arr', data=dep_Arr)
+			group.create_dataset(name='dep_Arr_msk', data=dep_Arr>0)
+		pass
 	
 	def get_c(self,wave='phase'):
 		"""Ger c0, c1, c2 for the given period
 		"""
-		dset = dispDBase.dispASDF(self.age_h5)
+		dset = dispDBase.dispASDF(self.attrs['age_h5'])
 		# dset = dispDBase.dispASDF('age_model_new.h5')
-		str_per = str(int(self.period)).zfill(2)
-		c_dic = dset.auxiliary_data.FitResult[str_per][wave].parameters
-		self.c0 = c_dic['c0']
-		self.c1 = c_dic['c1']
-		self.c2 = c_dic['c2']
-		self.age_vel = self.c0 + self.c1*np.sqrt(self.age_Arr) + self.c2*self.age_Arr
+		for period in self.attrs['prd_arr']:
+			str_per = str(int(period)).zfill(2)
+			group = self['%g_sec'%( period )]
+			c_dic = dset.auxiliary_data.FitResult[str_per][wave].parameters
+			c0 = c_dic['c0']
+			c1 = c_dic['c1']
+			c2 = c_dic['c2']
+			age_vel = c0 + c1*np.sqrt(group['age_Arr'].value) + c2*group['age_Arr'].value
+			group.create_dataset(name='age_vel', data=age_vel)
+			group.create_dataset(name='age_vel_msk', data=group['age_Arr_msk'].value)
+			group.attrs.create(name = 'c0', data = c0, dtype='f')
+			group.attrs.create(name = 'c1', data = c1, dtype='f')
+			group.attrs.create(name = 'c2', data = c2, dtype='f')
 		return
 	
 	def _get_basemap(self, projection='lambert', geopolygons=None, resolution='i', bound=True, hillshade=False):
 		"""Get basemap for plotting results
 		"""
 		# fig=plt.figure(num=None, figsize=(12, 12), dpi=80, facecolor='w', edgecolor='k')
-		minlon=self.minlon
-		maxlon=self.maxlon
-		minlat=self.minlat
-		maxlat=self.maxlat
+		minlat = self.attrs['minlat']
+		maxlat = self.attrs['maxlat']
+		minlon = self.attrs['minlon']
+		maxlon = self.attrs['maxlon']
 		lat_centre = (maxlat+minlat)/2.0
 		lon_centre = (maxlon+minlon)/2.0
 		if projection=='merc':
@@ -153,7 +226,7 @@ class CompSurfVel:
 			m.imshow(ls.hillshade(etopoZ, vert_exag=1.),cmap='gray')
 		return m	
 
-	def plot_age(self,projection='lambert',geopolygons=None, showfig=True, vmin=0, vmax=None, hillshade=True):
+	def plot_age(self,period=6., projection='lambert',geopolygons=None, showfig=True, vmin=0, vmax=None, hillshade=True):
 		"""Plot age map
 		"""
 		if hillshade:
@@ -161,16 +234,19 @@ class CompSurfVel:
 		else:
 			alpha =1.
 		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
-		x, y = m(self.lonArr, self.latArr)
+		group = self['%g_sec'%( period )]
+		x, y = m(group['lonArr'].value, group['latArr'].value)
 		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
+		age_Arr = group['age_Arr'].value
+		age_Arr_msk = group['age_Arr_msk'].value
 		if vmin == None:
-			vmin = np.nanmin(self.age_Arr.data[~self.age_Arr.mask])
+			vmin = np.nanmin(age_Arr[~age_Arr_msk])
 			vmin = np.floor(vmin/5.)*5.
 		if vmax == None:
-			vmax = np.nanmax(self.age_Arr.data[~self.age_Arr.mask])
+			vmax = np.nanmax(age_Arr[~age_Arr_msk])
 			vmax = np.ceil(vmax/5.)*5.
-		im = m.pcolormesh(x, y, self.age_Arr, cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
-		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%.2f')
+		im = m.pcolormesh(x, y, np.ma.masked_array(age_Arr, mask=age_Arr_msk), cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%d')
 		cb.set_label('Age (Ma)', fontsize=12, rotation=0)
 		cb.set_alpha(1)
 		cb.draw_all()
@@ -180,7 +256,37 @@ class CompSurfVel:
 			plt.show()
 		return
 	
-	def plot_tomo_vel(self, projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, hillshade=False):
+	def plot_sed(self,period=6.,projection='lambert',geopolygons=None, showfig=True, vmin=0, vmax=None, hillshade=True):
+		"""Plot sedimentary thickness map
+		"""
+		if hillshade:
+			alpha = 0.5
+		else:
+			alpha =1.
+		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
+		group = self['%g_sec'%( period )]
+		x, y = m(group['lonArr'].value, group['latArr'].value)
+		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
+		sed_Arr = group['sed_Arr'].value
+		sed_Arr_msk = group['sed_Arr_msk'].value
+		if vmin == None:
+			vmin = np.nanmin(sed_Arr[~sed_Arr_msk])
+			vmin = np.floor(vmin/5.)*5.
+		if vmax == None:
+			vmax = np.nanmax(sed_Arr[~sed_Arr_msk])
+			vmax = np.ceil(vmax/5.)*5.
+		im = m.pcolormesh(x, y, np.ma.masked_array(sed_Arr,mask=sed_Arr_msk), cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%d')
+		cb.set_label('Sediment thickness (m)', fontsize=12, rotation=0)
+		cb.set_alpha(1)
+		cb.draw_all()
+		ax = plt.gca() # only plot the oceanic part for JdF
+		# ax.set_xlim(right=x_max)
+		if showfig:
+			plt.show()
+		return
+	
+	def plot_tomo_vel(self, period=6., projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, sta=True, hillshade=False):
 		"""Plot velocity map from tomography result
 		"""
 		if hillshade:
@@ -188,28 +294,33 @@ class CompSurfVel:
 		else:
 			alpha =1.
 		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
-		x, y = m(self.lonArr, self.latArr)
+		group = self['%g_sec'%( period )]
+		x, y = m(group['lonArr'].value, group['latArr'].value)
 		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
+		tomo_data = group['tomo_data'].value
+		tomo_data_msk = group['tomo_data_msk'].value
 		if vmin == None:
-			vmin = np.nanmin(self.tomo_data[~self.tomo_data.mask])
+			vmin = np.nanmin(tomo_data[~tomo_data_msk])
 			vmin = np.ceil(vmin*20.)/20.
 		if vmax == None:
-			vmax = np.nanmax(self.tomo_data[~self.tomo_data.mask])
+			vmax = np.nanmax(tomo_data[~tomo_data_msk])
 			vmax = np.floor(vmax*20.)/20.
-		im = m.pcolormesh(x, y, self.tomo_data, cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		im = m.pcolormesh(x, y, np.ma.masked_array(tomo_data,mask=tomo_data_msk), cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
 		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%.2f')
 		cb.set_label('vel (km/s)', fontsize=12, rotation=0)
 		cb.set_alpha(1)
 		cb.draw_all()
 		ax = plt.gca() # only plot the oceanic part for JdF
+		if sta:
+			self.sta_on_plot(ax,m,period)
 		# ax.set_xlim(right=x_max)
 		fig = plt.gcf()
-		fig.suptitle(str(self.period)+' sec', fontsize=14,y=0.95)
+		fig.suptitle(str(period)+' sec', fontsize=14,y=0.95)
 		if showfig:
 			plt.show()
 		pass
 	
-	def plot_age_vel(self, projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, hillshade=False):
+	def plot_age_vel(self, period=6., projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, sta=True, hillshade=False):
 		"""Plot age-dependent velocity map
 		"""
 		if hillshade:
@@ -217,36 +328,46 @@ class CompSurfVel:
 		else:
 			alpha =1.
 		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
-		x, y = m(self.lonArr, self.latArr)
+		group = self['%g_sec'%( period )]
+		x, y = m(group['lonArr'].value, group['latArr'].value)
 		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
+		age_vel = group['age_vel'].value
+		age_vel_msk = group['age_vel_msk'].value
 		if vmin == None:
-			vmin = np.nanmin(self.age_vel[~self.age_vel.mask])
+			vmin = np.nanmin(age_vel[~age_vel_msk])
 			vmin = np.ceil(vmin*20.)/20.
 		if vmax == None:
-			vmax = np.nanmax(self.age_vel[~self.age_vel.mask])
+			vmax = np.nanmax(age_vel[~age_vel_msk])
 			vmax = np.floor(vmax*20.)/20.
-		im = m.pcolormesh(x, y, self.age_vel, cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
+		im = m.pcolormesh(x, y, np.ma.masked_array(age_vel,mask=age_vel_msk), cmap=my_cmap, shading='gouraud', vmin=vmin, vmax=vmax, alpha=alpha)
 		cb = m.colorbar(im, "bottom", size="3%", pad='2%', format='%.2f')
 		cb.set_label('vel (km/s)', fontsize=12, rotation=0)
 		cb.set_alpha(1)
 		cb.draw_all()
 		ax = plt.gca() # only plot the oceanic part for JdF
+		if sta:
+			self.sta_on_plot(ax,m,period)
 		# ax.set_xlim(right=x_max)
 		fig = plt.gcf()
-		fig.suptitle(str(self.period)+' sec', fontsize=14,y=0.95)
+		fig.suptitle(str(period)+' sec', fontsize=14,y=0.95)
 		if showfig:
 			plt.show()
 		pass
 
-	def plot_diff(self,projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, hillshade=False, pct=True):
+	def plot_diff(self, period=6., projection='lambert',geopolygons=None, showfig=True, vmin=None, vmax=None, sta=True, hillshade=False, pct=True):
 		"""Plot the difference between tomography result and age-dependent velocity map
 		"""
-		mask = np.logical_or(self.age_vel.mask, self.tomo_data.mask)
+		group = self['%g_sec'%( period )]
+		age_vel = group['age_vel'].value
+		age_vel_msk = group['age_vel_msk'].value
+		tomo_data = group['tomo_data'].value
+		tomo_data_msk = group['tomo_data_msk'].value
+		mask = np.logical_or(age_vel_msk, tomo_data_msk)
 		if pct:
-			data = (self.tomo_data - self.age_vel) / self.age_vel*100
+			data = (tomo_data - age_vel) / age_vel* 100
 			cb_label = 'vel difference (%)'
 		else:
-			data = self.tomo_data - self.age_vel
+			data = tomo_data - age_vel
 			cb_label = 'vel difference (km/s)'
 		plt_data = np.ma.masked_array(data, mask=mask)
 		if hillshade:
@@ -254,7 +375,7 @@ class CompSurfVel:
 		else:
 			alpha =1.
 		m = self._get_basemap(projection=projection, geopolygons=geopolygons,hillshade=hillshade)
-		x, y = m(self.lonArr, self.latArr)
+		x, y = m(group['lonArr'].value, group['latArr'].value)
 		my_cmap = pycpt.load.gmtColormap('./cv.cpt')
 		if vmin == None:
 			vmin = np.nanmin(plt_data[~mask])
@@ -269,27 +390,107 @@ class CompSurfVel:
 		cb.draw_all()
 		ax = plt.gca() # only plot the oceanic part for JdF
 		# ax.set_xlim(right=x_max)
+		if sta:
+			self.sta_on_plot(ax,m,period)
 		fig = plt.gcf()
-		fig.suptitle(str(self.period)+' sec', fontsize=14,y=0.95)
+		fig.suptitle(str(period)+' sec', fontsize=14,y=0.95)
 		if showfig:
 			plt.show()
 		pass
 	
-	def plot_age_curve(self,showfig=True):
+	def plot_age_curve(self, period=6., showfig=True):
 		"""Plot vel vs. age for the tomography result
 		"""
-		mask = np.logical_or(self.tomo_data.mask, self.age_Arr.mask)
-		vel_vec = self.tomo_data[~mask]
-		age_vec = self.age_Arr[~mask]
+		group = self['%g_sec'%( period )]
+		tomo_data = group['tomo_data'].value
+		tomo_data_msk = group['tomo_data_msk'].value
+		age_Arr = group['age_Arr'].value
+		age_Arr_msk = group['age_Arr_msk'].value
+		mask = np.logical_or(tomo_data_msk, age_Arr_msk)
+		vel_vec = tomo_data[~mask]
+		age_vec = age_Arr[~mask]
 		plt.plot(age_vec, vel_vec, 'r.')
-		plt.xlim(xmin=0)
 		ages = np.linspace(0,age_vec.max(),100)
-		vels = self.c0+self.c1*np.sqrt(ages)+self.c2*ages
-		plt.plot(age_vec, vel_vec, 'r.')
+		vels = group.attrs['c0']+group.attrs['c1']*np.sqrt(ages)+group.attrs['c2']*ages
 		plt.plot(ages, vels, 'b-')
+		plt.xlim(xmin=0)
 		plt.xlabel('Age (Ma)', fontsize=14)
 		plt.ylabel('vel (km/s)', fontsize=14)
-		fig.suptitle(str(self.period)+' sec', fontsize=14)
+		fig = plt.gcf()
+		fig.suptitle(str(period)+' sec', fontsize=14)
 		if showfig:
 			plt.show()
 		pass
+	
+	def plot_sed_curve(self, period=6., showfig=True):
+		"""Plot vel vs. sediment thickness for the tomography result
+		"""
+		group = self['%g_sec'%( period )]
+		tomo_data = group['tomo_data'].value
+		mask = group['tomo_data_msk'].value
+		sed_Arr = group['sed_Arr'].value
+		vel_vec = tomo_data[~mask]
+		sed_vec = sed_Arr[~mask]
+		plt.plot(sed_vec, vel_vec, 'r.')
+		plt.xlim(xmin=0)
+		plt.xlabel('Sediment thickness (m)', fontsize=14)
+		plt.ylabel('vel (km/s)', fontsize=14)
+		fig = plt.gcf()
+		fig.suptitle(str(period)+' sec', fontsize=14)
+		if showfig:
+			plt.show()
+		pass
+	
+	def plot_dep_curve(self, period=6., showfig=True):
+		"""Plot tomography vel results vs. oceanic water depth
+		"""
+		group = self['%g_sec'%( period )]
+		tomo_data = group['tomo_data'].value
+		dep_Arr = group['dep_Arr'].value
+		mask = np.logical_or(group['tomo_data_msk'].value, group['dep_Arr_msk'].value)
+		vel_vec = tomo_data[~mask]
+		dep_vec = dep_Arr[~mask]
+		plt.plot(dep_vec, vel_vec, 'r.')
+		plt.xlim(xmax=0)
+		plt.xlabel('Water depth (m)', fontsize=14)
+		plt.ylabel('vel (km/s)', fontsize=14)
+		fig = plt.gcf()
+		fig.suptitle(str(period)+' sec', fontsize=14)
+		if showfig:
+			plt.show()
+		pass
+
+	def sta_on_plot(self, ax, basemap, period, ms=6):
+		"""Add stations on plot
+		"""
+		group = self['%g_sec'%( period )]
+		if group['res_data'].value.size == 0:
+			self.get_res_data()
+		cords1 = group['res_data'].value[:,1:3]
+		cords2 = group['res_data'].value[:,3:5]
+		sta_cords,cnts = np.unique(np.concatenate((cords1,cords2),axis=0), return_counts=True, axis=0)
+		x, y = basemap(sta_cords[:,1], sta_cords[:,0])
+		ax.plot(x,y,'^', color='gray',alpha=.5, ms=ms)
+		pass
+	
+def cal_dist(origs,dests):
+	""" Calculate the great-circle distance between points on geographic map
+	Parameters:
+		origs -- 2*N array, with row 0 latitude, row 1 longitude
+		dests -- 2*N array, with row 0 latitude, row 1 longitude
+	"""
+	radius = 6371.009 # km
+	if origs.ndim:
+		lat1, lon1 = origs
+		lat2, lon2 = dests
+	else:
+		lat1 = origs[0,:]
+		lon1 = origs[1,:]
+		lat2 = dests[0,:]
+		lon2 = dests[1,:]
+	dlat = (lat2-lat1) / 180. * np.pi
+	dlon = (lon2-lon1) / 180. * np.pi
+	a = np.sin(dlat/2) * np.sin(dlat/2) + np.cos(lat1 / 180. * np.pi) \
+		* np.cos(lat2 / 180. * np.pi) * np.sin(dlon/2) * np.sin(dlon/2)
+	c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+	return radius * c
