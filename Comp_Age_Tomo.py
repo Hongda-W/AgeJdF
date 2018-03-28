@@ -198,8 +198,10 @@ class CompSurfVel(h5py.File):
 		if bound:
 			try:
 				# m.readshapefile('/projects/howa1663/Code/ToolKit/Models/Plates/PB2002_boundaries', name='PB2002_boundaries', drawbounds=True, linewidth=1, color='orange') # draw plate boundary on basemap
-				m.readshapefile('/work3/wang/code_bkup/AgeJdF/Plates/PB2002_boundaries', name='PB2002_boundaries', drawbounds=True, \
-						linewidth=1, color='orange')
+				#m.readshapefile('/work3/wang/code_bkup/AgeJdF/Plates/PB2002_boundaries', name='PB2002_boundaries', drawbounds=True, \
+				#		linewidth=1, color='orange')
+				m.readshapefile('/work3/wang/code_bkup/ToolKit/Models/UT_Dallas_Plates/ridge',name='ridge',drawbounds=True, linewidth=1, color='orange')
+				m.readshapefile('/work3/wang/code_bkup/ToolKit/Models/UT_Dallas_Plates/trench',name='trench',drawbounds=True, linewidth=1, color='orange')
 			except IOError:
 				print("Couldn't read shape file! Continue without drawing plateboundaries")
 		try:
@@ -340,6 +342,8 @@ class CompSurfVel(h5py.File):
 		cb.set_alpha(1)
 		cb.draw_all()
 		ax = plt.gca() # only plot the oceanic part for JdF
+		x_cobb,y_cobb = m(-130.0000,46.0000)
+		ax.plot(x_cobb,y_cobb,'o', color='gray',alpha=.6,ms=8,mec='white')
 		if sta:
 			self.sta_on_plot(ax,m,period)
 		# ax.set_xlim(right=x_max)
