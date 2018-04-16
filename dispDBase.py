@@ -9,7 +9,7 @@ from mpl_toolkits.basemap import Basemap, shiftgrid, cm
 import matplotlib.pyplot as plt
 import pycpt
 from matplotlib.patches import Polygon, Path
-from scipy.interpolate import NearestNDInterpolator, LinearNDInterpolator
+from scipy.interpolate import NearestNDInterpolator, LinearNDInterpolator, interp2d
 from scipy import optimize
 import scipy.signal
 import scipy.fftpack
@@ -46,18 +46,18 @@ class dispASDF(pyasdf.ASDFDataSet):
 		"""read in crustal age model for the oceans
 		"""
 		# dset = Dataset('/projects/howa1663/Code/ToolKit/Models/Age_Ocean_Crust/age.3.2.nc','r')
-		dset = Dataset('./age.3.2.nc','r')
+		dset = Dataset('./age.3.2.nc','r') # 2-minute resolution
 		longitude = dset.variables['x'][:]
 		longitude[longitude<0] += 360.
 		latitude = dset.variables['y'][:]
 		z = dset.variables['z'][:] # masked array
 		mask = dset.variables['z'][:].mask
 		data = dset.variables['z'][:].data / 100.
-		data[mask] = 99999.
-		data = data[(latitude > self.minlat)*(latitude < self.maxlat),:]
-		data = data[:,(longitude > self.minlon)*(longitude < self.maxlon)]
-		longitude = longitude[(longitude > self.minlon)*(longitude < self.maxlon)]
-		latitude = latitude[(latitude > self.minlat)*(latitude < self.maxlat)]
+		data[mask] = 9999.
+		data = data[(latitude >= self.minlat)*(latitude <= self.maxlat),:]
+		data = data[:,(longitude >= self.minlon)*(longitude <= self.maxlon)]
+		longitude = longitude[(longitude >= self.minlon)*(longitude <= self.maxlon)]
+		latitude = latitude[(latitude >= self.minlat)*(latitude <= self.maxlat)]
 		self.age_data = data; self.age_lon = longitude; self.age_lat = latitude
 		return
 	
@@ -72,10 +72,10 @@ class dispASDF(pyasdf.ASDFDataSet):
 		lons = lons+west
 		lats = etopo1.variables["y"][:]
 		z = etopo1.variables["z"][:]
-		etopoz = z[(lats>(self.minlat))*(lats<(self.maxlat)), :]
-		etopoz = etopoz[:, (lons>self.minlon)*(lons<self.maxlon)]
-		lats = lats[(lats>self.minlat)*(lats<self.maxlat)]
-		lons = lons[(lons>self.minlon)*(lons<self.maxlon)]
+		etopoz = z[(lats>=(self.minlat))*(lats<=(self.maxlat)), :]
+		etopoz = etopoz[:, (lons>=self.minlon)*(lons<=self.maxlon)]
+		lats = lats[(lats>=self.minlat)*(lats<=self.maxlat)]
+		lons = lons[(lons>=self.minlon)*(lons<=self.maxlon)]
 		etopox, etopoy = np.meshgrid(lats, lons, indexing='ij')
 		etopox = etopox.flatten()
 		etopoy = etopoy.flatten()
@@ -127,18 +127,22 @@ class dispASDF(pyasdf.ASDFDataSet):
 		print('End writing obspy inventory to ASDF dataset')
 		return
 	
-	def get_ages(self, arr):
+	def get_ages(self, lons,lats):
 		""" calculate ages for a give list of points on the ocean floor
 		Parameters:
-					arr  -- numpy array of size ( ,2), containing the lat & lon for the points
+					lons  -- longitude vector
+					lats  -- latitude vector
 		"""
-		yy, xx = np.meshgrid(self.age_lon, self.age_lat)
-		xx = xx.reshape(xx.size)
+		xx, yy = np.meshgrid(self.age_lon, self.age_lat) # xx for longitude, yy for latitude
+		xx = xx.reshape(xx.size) #nearest
 		yy = yy.reshape(yy.size)
-		x = np.vstack((xx,yy)).T
+		x = np.column_stack((xx,yy))
 		y = self.age_data.reshape(self.age_data.size)
 		f = NearestNDInterpolator(x,y,rescale=False)
-		ages = f(arr)
+		ages = f(np.column_stack((lons,lats)))
+		# mask = self.age_data > 180
+		#f = interp2d(xx[~mask],yy[~mask],self.age_data[~mask],kind='cubic') # cubic spline interpolation
+		# ages = f(lons,lats)
 		return ages
 			
 	def read_paths(self,disp_dir='/work3/wang/JdF/FTAN',res=3.5):
@@ -597,7 +601,8 @@ class dispASDF(pyasdf.ASDFDataSet):
 		return
 	
 	def plot_age_model(lons, lats, resolution='i', cpt='/projects/howa1663/Code/ToolKit/Models/Age_Ocean_Crust/age1.cpt'):
-		
+		""" Not finished
+		"""
 		#mycm=pycpt.load.gmtColormap(cpt)
 		try:
 			etopo1 = Dataset('/work2/wang/Code/ToolKit/ETOPO1_Ice_g_gmt4.grd','r') # read in the etopo1 file which was used as the basemap
