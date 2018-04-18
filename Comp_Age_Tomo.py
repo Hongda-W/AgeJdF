@@ -36,13 +36,15 @@ class CompSurfVel(h5py.File):
 		self.attrs.create(name = 'prd_arr', data = pers, dtype='f')
 		self.poly_lst = [(360.-126.729,49.292),(360.-125.021,48.105),(360.-124.299,44.963),(360.-124.7,43.203),\
 			(360.-126.545,43.586),(360.-131.406,44.8),(360.-130.97,47.),(360.-129.821,49.12)]
-		# try:
-		# 	self.Rbf_func
-		# except:
-		# 	self._get_Rbf_func()
+		try:
+			self.Rbf_func
+		except:
+			self._get_Rbf_func()
 		return
 	
 	def _get_Rbf_func(self,sed_file='/work3/wang/code_bkup/ToolKit/Models/SedThick/sedthick_world_v2.xyz'):
+		""" Get the interpolation function for the sediment thickness data using radial basis function
+		"""
 		thk_xyz = np.loadtxt(sed_file)
 		minlat = self.attrs['minlat']
 		maxlat = self.attrs['maxlat']
@@ -185,7 +187,8 @@ class CompSurfVel(h5py.File):
 		pass
 	
 	def _cons_traj(self,lon,lat,period):
-		""" Based on the given longitude & latitude, construct a trajectory for connnecting age gradient vectors on the map
+		""" Based on the given longitude & latitude, construct a trajectory for connnecting age gradient vectors on the map.
+		Doesn't work very well. 
 		Parameter:
 					lon,lat -- longitude and latitude of the input point
 					period  -- the period of the interested dataset
@@ -244,7 +247,7 @@ class CompSurfVel(h5py.File):
 		return mask
 	
 	def _cons_traj_stream(self,period=6.,lon=232.,lat=48.,N=20,projection='lambert'):
-		""" Construct trajectory from the stream plot
+		""" Construct trajectory from the stream plot. The output are coordinates for the points interpolated along the desired stream line
 		"""
 		strm = self.plot_age_deriv(period=period, lon=lon, lat=lat, streamline=True, projection=projection, showfig=False)
 		m = self._get_basemap(projection=projection)
@@ -351,6 +354,78 @@ class CompSurfVel(h5py.File):
 			group.create_dataset(name=name, data=arr)
 		pass
 	
+	def get_traj_data(self,lon1=232,lat1=48.,lon2=232.,lat2=46.5,lon3=232.,lat3=45.,N=20):
+		""" Get data along trajecoty, not done
+		Parameters:
+		"""
+		group = self.create_group(name='3_trajs')
+		
+		try:
+			self.age_func
+		except:
+			self._get_age_func()
+		for period in self.attrs['prd_arr']:
+			lons_out1, lats_out1 = self._cons_traj_stream(period=period,lon=lon1,lat=lat1,N=N)
+			lons_out2, lats_out2 = self._cons_traj_stream(period=period,lon=lon2,lat=lat2,N=N)
+			lons_out3, lats_out3 = self._cons_traj_stream(period=period,lon=lon3,lat=lat3,N=N)
+			ages1 = self.age_func(np.column_stack((lons_out1,lats_out1)))
+			ages2 = self.age_func(np.column_stack((lons_out2,lats_out2)))
+			ages3 = self.age_func(np.column_stack((lons_out3,lats_out3)))
+			seds1 = self.Rbf_func(lats_out1, lons_out1)
+			seds2 = self.Rbf_func(lats_out2, lons_out2)
+			seds3 = self.Rbf_func(lats_out3, lons_out3)
+			group_per = self['%g_sec'%( period )]
+			tomo_data = group_per['tomo_data'].value
+			tomo_data_msk = group_per['tomo_data_msk'].value
+			lonArr = group_per['lonArr'].value
+			latArr = group_per['latArr'].value
+			x1 = lonArr[~tomo_data_msk]
+			y1 = latArr[~tomo_data_msk]
+			z1 = tomo_data[~tomo_data_msk]
+			vels1 = griddata(np.column_stack((x1,y1)), z1, (lons_out1, lats_out1), method='linear', fill_value=0.)
+			vels2 = griddata(np.column_stack((x1,y1)), z1, (lons_out2, lats_out2), method='linear', fill_value=0.)
+			vels3 = griddata(np.column_stack((x1,y1)), z1, (lons_out3, lats_out3), method='linear', fill_value=0.)
+			mask1 = np.logical_or(ages1>180, vels1<0.5)
+			mask2 = np.logical_or(ages2>180, vels2<0.5)
+			mask3 = np.logical_or(ages3>180, vels3<0.5)
+			subgrp = group.create_group('%g_sec'%( period ))
+			subgrp.create_dataset(name='traj_N', data=np.column_stack((lons_out1,lats_out1)))
+			subgrp.create_dataset(name='traj_M', data=np.column_stack((lons_out2,lats_out2)))
+			subgrp.create_dataset(name='traj_S', data=np.column_stack((lons_out3,lats_out3)))
+			subgrp.create_dataset(name='mask_N', data=mask1)
+			subgrp.create_dataset(name='mask_M', data=mask2)
+			subgrp.create_dataset(name='mask_S', data=mask3)
+			subgrp.create_dataset(name='vels_N', data=vels1)
+			subgrp.create_dataset(name='vels_M', data=vels2)
+			subgrp.create_dataset(name='vels_S', data=vels3)
+			try:
+				curve_ye = self['Curve_Ye']['%g_sec_phase'%( period )].value
+				subgrp.create_dataset(name="Ye_2013", data=curve_ye)
+			except:
+				pass
+			try:
+				curve_ye_1 = self['Curve_Ye']['%g_sec_phase'%( period-1 )].value
+				subgrp.create_dataset(name="Ye_%g_sec"%(period-1), data=curve_ye_1)
+			except:
+				pass
+			dep_data = group_per['dep_Arr'].value
+			dep_data_msk = group_per['dep_Arr_msk'].value
+			x_dep = lonArr[~dep_data_msk]
+			y_dep = latArr[~dep_data_msk]
+			z_dep = dep_data[~dep_data_msk]
+			deps1 = griddata(np.column_stack((x_dep,y_dep)), z_dep, (lons_out1, lats_out1), method='linear', fill_value=0.)
+			deps2 = griddata(np.column_stack((x_dep,y_dep)), z_dep, (lons_out2, lats_out2), method='linear', fill_value=0.)
+			deps3 = griddata(np.column_stack((x_dep,y_dep)), z_dep, (lons_out3, lats_out3), method='linear', fill_value=0.)
+			subgrp.create_dataset(name='deps_N', data=deps1)
+			subgrp.create_dataset(name='deps_M', data=deps2)
+			subgrp.create_dataset(name='deps_S', data=deps3)
+			subgrp.create_dataset(name='seds_N', data=seds1)
+			subgrp.create_dataset(name='seds_M', data=seds2)
+			subgrp.create_dataset(name='seds_S', data=seds3)
+			subgrp.create_dataset(name='ages_N', data=ages1)
+			subgrp.create_dataset(name='ages_M', data=ages2)
+			subgrp.create_dataset(name='ages_S', data=ages3)
+		return
 	
 	def _get_basemap(self, projection='lambert', geopolygons=None, resolution='i', bound=True, hillshade=False):
 		"""Get basemap for plotting results
@@ -723,36 +798,32 @@ class CompSurfVel(h5py.File):
 		fig3.show()
 		pass
 	
-	def plot_3_traj(self, period=6., N=20):
+	def plot_3_traj(self, period=6.):
 		""" Plot the 3 North, Middle and South trajatory on top of tomography result &/or age map
 		"""
-		lons_out1, lats_out1 = self._cons_traj_stream(period=period,lon=232,lat=48,N=N)
-		lons_out2, lats_out2 = self._cons_traj_stream(period=period,lon=232,lat=46.5,N=N)
-		lons_out3, lats_out3 = self._cons_traj_stream(period=period,lon=232,lat=45,N=N)
-		try:
-			self.age_func
-		except:
-			self._get_age_func()
-		ages1 = self.age_func(np.column_stack((lons_out1,lats_out1)))
-		ages2 = self.age_func(np.column_stack((lons_out2,lats_out2)))
-		ages3 = self.age_func(np.column_stack((lons_out3,lats_out3)))
-		group = self['%g_sec'%( period )]
-		tomo_data = group['tomo_data'].value
-		tomo_data_msk = group['tomo_data_msk'].value
-		lonArr = group['lonArr'].value
-		latArr = group['latArr'].value
-		x1 = lonArr[~tomo_data_msk]
-		y1 = latArr[~tomo_data_msk]
-		z1 = tomo_data[~tomo_data_msk]
-		# f_tomo = interp2d(x1, y1, z1, fill_value=0.)
-		# vels = (f_tomo(lons_out, lats_out)).diagonal()
-		vels1 = griddata(np.column_stack((x1,y1)), z1, (lons_out1, lats_out1), method='linear', fill_value=0.)
-		vels2 = griddata(np.column_stack((x1,y1)), z1, (lons_out2, lats_out2), method='linear', fill_value=0.)
-		vels3 = griddata(np.column_stack((x1,y1)), z1, (lons_out3, lats_out3), method='linear', fill_value=0.)
-		mask1 = np.logical_or(ages1>180, vels1<0.5)
-		mask2 = np.logical_or(ages2>180, vels2<0.5)
-		mask3 = np.logical_or(ages3>180, vels3<0.5)
-		group = self['%g_sec'%( period )]
+		subgrp = self['3_trajs']['%g_sec'%( period )]
+		lons_out1 = subgrp['traj_N'].value[:,0]
+		lats_out1 = subgrp['traj_N'].value[:,1]
+		lons_out2 = subgrp['traj_M'].value[:,0]
+		lats_out2 = subgrp['traj_M'].value[:,1]
+		lons_out3 = subgrp['traj_S'].value[:,0]
+		lats_out3 = subgrp['traj_S'].value[:,1]
+		mask1 = subgrp['mask_N'].value
+		mask2 = subgrp['mask_M'].value
+		mask3 = subgrp['mask_S'].value
+		vels1 = subgrp['vels_N'].value
+		vels2 = subgrp['vels_M'].value
+		vels3 = subgrp['vels_S'].value
+		deps1 = subgrp['deps_N'].value
+		deps2 = subgrp['deps_M'].value
+		deps3 = subgrp['deps_S'].value
+		ages1 = subgrp['ages_N'].value
+		ages2 = subgrp['ages_M'].value
+		ages3 = subgrp['ages_S'].value
+		seds1 = subgrp['seds_N'].value
+		seds2 = subgrp['seds_M'].value
+		seds3 = subgrp['seds_S'].value
+		
 		fig1 = plt.figure(1)
 		m = self.plot_age(period=period, projection='lambert',geopolygons=None, showfig=False, vmin=0, vmax=None, hillshade=False)
 		x1_1, y1_1 = m(lons_out1, lats_out1)
@@ -763,6 +834,7 @@ class CompSurfVel(h5py.File):
 		ax1.plot(x1_2[~mask2], y1_2[~mask2],marker='.', linestyle='-', color='gray')
 		ax1.plot(x1_3[~mask3], y1_3[~mask3],marker='.', linestyle='-', color='gray')
 		fig1.show()
+		
 		fig2 = plt.figure(2)
 		m = self.plot_tomo_vel(period=period, projection='lambert',geopolygons=None, showfig=False, vmin=None, vmax=None, sta=True, hillshade=False)
 		x2_1, y2_1 = m(lons_out1, lats_out1)
@@ -773,32 +845,7 @@ class CompSurfVel(h5py.File):
 		ax2.plot(x2_2[~mask2], y2_2[~mask2],marker='.', linestyle='-', color='gray')
 		ax2.plot(x2_3[~mask3], y2_3[~mask3],marker='.', linestyle='-', color='gray')
 		fig2.show()
-		# fig3 = plt.figure(3)
-		# vel_min = np.append(np.append(vels1[~mask1],vels2[~mask2]),vels3[~mask3]).min()
-		# vel_max = np.append(np.append(vels1[~mask1],vels2[~mask2]),vels3[~mask3]).max()
-		# plt.plot(ages1[~mask1], vels1[~mask1], 'r.')
-		# plt.xlim(xmin=0)
-		# plt.ylim(np.floor(vel_min*2.)/2.,np.ceil(vel_max*2.)/2.)
-		# plt.xlabel('Age (Ma)', fontsize=14)
-		# plt.ylabel('vel (km/s)', fontsize=14)
-		# fig3.suptitle(str(period)+' sec_N', fontsize=14)
-		# fig3.show()
-		# fig4 = plt.figure(4)
-		# plt.plot(ages2[~mask2], vels2[~mask2], 'r.')
-		# plt.xlim(xmin=0)
-		# plt.ylim(np.floor(vel_min*2.)/2.,np.ceil(vel_max*2.)/2.)
-		# plt.xlabel('Age (Ma)', fontsize=14)
-		# plt.ylabel('vel (km/s)', fontsize=14)
-		# fig4.suptitle(str(period)+' sec_M', fontsize=14)
-		# fig4.show()
-		# fig5 = plt.figure(5)
-		# plt.plot(ages3[~mask3], vels3[~mask3], 'r.')
-		# plt.xlim(xmin=0)
-		# plt.ylim(np.floor(vel_min*2.)/2.,np.ceil(vel_max*2.)/2.)
-		# plt.xlabel('Age (Ma)', fontsize=14)
-		# plt.ylabel('vel (km/s)', fontsize=14)
-		# fig5.suptitle(str(period)+' sec_S', fontsize=14)
-		# fig5.show()
+		
 		fig3 = plt.figure(3)
 		vel_min = np.append(np.append(vels1[~mask1],vels2[~mask2]),vels3[~mask3]).min()
 		vel_max = np.append(np.append(vels1[~mask1],vels2[~mask2]),vels3[~mask3]).max()
@@ -806,10 +853,14 @@ class CompSurfVel(h5py.File):
 		plt.plot(ages2[~mask2], vels2[~mask2], marker='o', linestyle='-', color='green', label='M')
 		plt.plot(ages3[~mask3], vels3[~mask3], marker='o', linestyle='-', color='blue', label='S')
 		try:
-			curve_ye = self['Curve_Ye']['%g_sec_phase'%( period )].value
+			curve_ye = subgrp["Ye_2013"].value
 			plt.plot(curve_ye[:,0], curve_ye[:,1], color='gray', label='Ye_2013')
 		except:
-			pass
+			try:
+				curve_ye = subgrp["Ye_%g_sec"%(period-1)]
+				plt.plot(curve_ye[:,0], curve_ye[:,1], color='gray', label="Ye_%g_sec"%(period-1))
+			except:
+				pass
 		plt.legend(fontsize=12)
 		plt.xlim(xmin=0.5)
 		plt.ylim(np.floor(vel_min*2.)/2.,np.ceil(vel_max*2.)/2.)
@@ -817,6 +868,34 @@ class CompSurfVel(h5py.File):
 		plt.ylabel('vel (km/s)', fontsize=14)
 		fig3.suptitle(str(period)+" sec", fontsize=14)
 		fig3.show()
+		
+		fig4 = plt.figure(4)
+		dep_min = np.append(np.append(deps1,deps2),deps3).min()
+		dep_max = np.append(np.append(deps1,deps2),deps3).max()
+		plt.plot(ages1[~mask1], deps1[~mask1], marker='o', linestyle='-', color='red', label='N')
+		plt.plot(ages2[~mask2], deps2[~mask2], marker='o', linestyle='-', color='green', label='M')
+		plt.plot(ages3[~mask3], deps3[~mask3], marker='o', linestyle='-', color='blue', label='S')
+		plt.legend(fontsize=12)
+		plt.xlim(xmin=0.5)
+		plt.ylim(np.floor(dep_min/100)*100,np.ceil(dep_max/100)*100)
+		plt.xlabel('Age (Ma)', fontsize=14)
+		plt.ylabel('Water depth (m)', fontsize=14)
+		fig4.suptitle(str(period)+" sec", fontsize=14)
+		fig4.show()
+		
+		fig5 = plt.figure(5)
+		sed_min = np.append(np.append(seds1,seds2),seds3).min()
+		sed_max = np.append(np.append(seds1,seds2),seds3).max()
+		plt.plot(ages1[~mask1], seds1[~mask1], marker='o', linestyle='-', color='red', label='N')
+		plt.plot(ages2[~mask2], seds2[~mask2], marker='o', linestyle='-', color='green', label='M')
+		plt.plot(ages3[~mask3], seds3[~mask3], marker='o', linestyle='-', color='blue', label='S')
+		plt.legend(fontsize=12)
+		plt.xlim(xmin=0.5)
+		plt.ylim(np.floor(sed_min/100)*100,np.ceil(sed_max/100)*100)
+		plt.xlabel('Age (Ma)', fontsize=14)
+		plt.ylabel('Sediment thickness (m)', fontsize=14)
+		fig5.suptitle(str(period)+" sec", fontsize=14)
+		fig5.show()
 		pass
 	
 	
